@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cache-doctor",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  // The account is chosen at deploy time with CLOUDFLARE_ACCOUNT_ID, so this file works for anyone.
+  "workers_dev": true,
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  // 10 checks a minute per visitor address. Repeats of the same URL within a minute come from the cache.
+  "ratelimits": [{ "name": "LIMITER", "namespace_id": "4271", "simple": { "limit": 10, "period": 60 } }]
+}

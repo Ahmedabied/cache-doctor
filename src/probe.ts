@@ -48,7 +48,7 @@ async function readCapped(res: Response, maxBytes: number): Promise<{ text: stri
     off += take;
     if (off >= all.byteLength) break;
   }
-  return { text: new TextDecoder("utf-8", { fatal: false }).decode(all), bytes };
+  return { text: new TextDecoder("utf-8").decode(all), bytes };
 }
 
 export async function snapshot(target: string, opts: ProbeOptions = {}): Promise<{ snap: Snapshot; hops: Hop[] }> {
