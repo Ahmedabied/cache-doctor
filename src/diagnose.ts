@@ -40,6 +40,13 @@ const EDGE_COOKIES = /^(__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|__cfwaiting
 const SERVED_FROM_CACHE = /^(HIT|STALE|UPDATING|REVALIDATED)\b|\bhit\b/i;
 const STATIC_TYPES = /^(text\/css|(text|application)\/javascript|image\/|font\/|audio\/|video\/|application\/(wasm|pdf|zip|octet-stream))/;
 
+// Everything a server sends is untrusted. Control characters and bidi overrides would let a
+// page rewrite the terminal or disguise text, so they are shown as codes.
+export function clean(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 export function parseCacheControl(value: string | undefined): Map<string, string | true> {
   const out = new Map<string, string | true>();
   if (!value) return out;
@@ -165,7 +172,7 @@ function show(context: string): string {
 export function diagnose(url: string, a: Snapshot, b?: Snapshot): Diagnosis {
   const f: Finding[] = [];
   const add = (id: string, severity: Severity, title: string, detail: string, fix: string) =>
-    f.push({ id, severity, title, detail, fix });
+    f.push({ id, severity, title: clean(title), detail: clean(detail), fix: clean(fix) });
   const h = a.headers;
 
   // Targeted headers (RFC 9213) win over Cache-Control at CDNs that support them.
@@ -275,7 +282,8 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot): Diagnosis {
 
   // 6. No lifetime at all.
   const type = (h["content-type"] ?? "").toLowerCase();
-  if (!explicit && !shared.has("no-store") && priv !== true && noCache !== true && a.status < 400) {
+  if (!explicit && !shared.has("no-store") && priv !== true && noCache !== true && a.status < 400 &&
+      CACHEABLE_BY_DEFAULT.has(a.status)) {
     if (STATIC_TYPES.test(type)) {
       add("no-lifetime-static", "info", "No lifetime given for a static file",
         "CDNs cache common static file types by default, with their own default lifetime. Browsers guess from Last-Modified.",

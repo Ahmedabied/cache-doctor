@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.ts\"",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },

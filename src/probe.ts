@@ -1,7 +1,7 @@
 // Fetch a URL the way a CDN sees a first-time visitor: no cookies, no auth, redirects not
 // followed blindly. Uses the standard fetch, so it runs the same in Node and in a Worker.
 
-import { diagnose, type Diagnosis, type Snapshot } from "./diagnose.ts";
+import { clean, diagnose, type Diagnosis, type Snapshot } from "./diagnose.ts";
 
 export interface ProbeOptions {
   timeoutMs?: number;
@@ -96,7 +96,7 @@ export async function check(target: string, opts: ProbeOptions = {}): Promise<Re
       id: "redirects",
       severity: "info",
       title: `${first.hops.length} redirect${first.hops.length > 1 ? "s" : ""} before the page`,
-      detail: first.hops.map((h) => `${h.status} ${h.url} -> ${h.location}`).join("; "),
+      detail: clean(first.hops.map((h) => `${h.status} ${h.url} -> ${h.location}`).join("; ")),
       fix: "Link to the final URL. Each redirect is an extra round trip, cached or not.",
     });
   }

@@ -2,6 +2,7 @@
 // cache-doctor <url> [--json] [--timeout ms]
 // Exit code: 0 cached or cacheable (maybe with issues), 1 not cacheable, 2 error.
 
+import { clean } from "./diagnose.ts";
 import { check, type Report } from "./probe.ts";
 
 const color = process.stdout.isTTY && !process.env["NO_COLOR"];
@@ -32,14 +33,14 @@ export function render(r: Report): string {
   const blocks = r.findings.filter((f) => f.severity === "blocks").length;
   const hurts = r.findings.filter((f) => f.severity === "hurts").length;
   const out = [
-    paint("1", r.url),
+    paint("1", clean(r.url)),
     `  verdict: ${VERDICT[r.verdict]}` +
       (blocks || hurts
         ? r.verdict === "cached-at-cdn"
           ? ` (${blocks} blocking and ${hurts} hurting for browsers and caches after the CDN)`
           : ` (${blocks} blocking, ${hurts} hurting)`
         : ""),
-    `  status ${r.status}, ${r.contentType.split(";")[0] || "no content type"}, ${(r.bytes / 1024).toFixed(1)} KB,` +
+    `  status ${r.status}, ${clean(r.contentType.split(";")[0] ?? "") || "no content type"}, ${(r.bytes / 1024).toFixed(1)} KB,` +
       ` shared lifetime ${r.ttl === null ? "not set" : `${r.ttl} s`}, checked in ${Math.round(r.ms)} ms`,
     "",
   ];
