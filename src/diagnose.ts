@@ -1,0 +1,368 @@
+// Why can this response not be shared from a cache? Pure analysis: give it two anonymous
+// snapshots of the same URL (fetched one after the other) and it explains what it finds.
+// No network, no Node or Worker APIs, so the CLI and the Worker share it.
+
+export type Severity = "blocks" | "hurts" | "info";
+
+export interface Finding {
+  id: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  fix: string;
+}
+
+export interface Snapshot {
+  url: string;
+  status: number;
+  headers: Record<string, string>; // lower-case names
+  setCookies: string[];
+  body: string;
+  bytes: number;
+  ms: number;
+}
+
+export interface Diagnosis {
+  url: string;
+  verdict: "cached-at-cdn" | "cacheable" | "cacheable-with-issues" | "not-cacheable";
+  ttl: number | null;
+  cdn: { name: string; status: string[] } | null;
+  findings: Finding[];
+}
+
+// Statuses a cache may store without being told how long (RFC 9110, section 15.1).
+const CACHEABLE_BY_DEFAULT = new Set([200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501]);
+const TRACKING = /^(utm_[a-z_]+|gclid|gbraid|wbraid|dclid|fbclid|msclkid|yclid|igshid|mc_cid|mc_eid|_ga|_gl|_hsenc|_hsmi|srsltid|ref_src)$/i;
+const BUSTERS = /^(_|cb|cachebust(er)?|nocache|no_cache|t|ts|timestamp|rand|random|v)$/i;
+// Cookies that CDNs and bot shields add at the edge, after the cache lookup. They are not part
+// of the cached page, so they do not stop the CDN from caching it.
+const EDGE_COOKIES = /^(__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|__cfwaitingroom|ak_bmsc|bm_sv|bm_sz|bm_mi|_abck|incap_ses_\d+_\d+|visid_incap_\d+|nlbi_\d+)$/i;
+const SERVED_FROM_CACHE = /^(HIT|STALE|UPDATING|REVALIDATED)\b|\bhit\b/i;
+const STATIC_TYPES = /^(text\/css|(text|application)\/javascript|image\/|font\/|audio\/|video\/|application\/(wasm|pdf|zip|octet-stream))/;
+
+export function parseCacheControl(value: string | undefined): Map<string, string | true> {
+  const out = new Map<string, string | true>();
+  if (!value) return out;
+  for (const part of value.match(/(?:[^,"]|"[^"]*")+/g) ?? []) {
+    const [rawKey, ...rest] = part.split("=");
+    const key = (rawKey ?? "").trim().toLowerCase();
+    if (!key) continue;
+    const v = rest.join("=").trim().replace(/^"(.*)"$/, "$1");
+    if (!out.has(key)) out.set(key, rest.length ? v : true);
+  }
+  return out;
+}
+
+function seconds(v: string | true | undefined): number | null {
+  if (v === undefined || v === true) return null;
+  return /^\d+$/.test(v) ? Number(v) : null;
+}
+
+function list(value: string | undefined): string[] {
+  return (value ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+function cookieName(c: string): string {
+  return (c.split(";")[0] ?? "").split("=")[0]?.trim() || "(unnamed)";
+}
+
+export function detectCdn(h: Record<string, string>): string | null {
+  if (h["cf-cache-status"] || h["cf-ray"]) return "Cloudflare";
+  if (h["x-vercel-cache"] || h["x-vercel-id"]) return "Vercel";
+  if (h["x-amz-cf-id"] || /cloudfront/i.test(h["via"] ?? "") || /cloudfront/i.test(h["x-cache"] ?? "")) return "CloudFront";
+  if (h["x-served-by"]?.includes("cache-") || h["fastly-debug-digest"] || /fastly/i.test(h["x-cache"] ?? "")) return "Fastly";
+  if (h["x-nf-request-id"]) return "Netlify";
+  if (h["akamai-cache-status"] || h["x-akamai-transformed"]) return "Akamai";
+  if (h["cache-status"] || h["x-cache"] || h["age"]) return "a cache";
+  return null;
+}
+
+export function cacheStatus(h: Record<string, string>): string {
+  return (
+    h["cf-cache-status"] ??
+    h["x-vercel-cache"] ??
+    h["cache-status"] ??
+    h["akamai-cache-status"] ??
+    h["x-cache"] ??
+    (h["age"] ? `age ${h["age"]}` : "")
+  ).trim();
+}
+
+const CF_STATUS: Record<string, string> = {
+  DYNAMIC: "Cloudflare did not consider this cacheable at all. By default it caches static file types only, not HTML, unless a Cache Rule says otherwise.",
+  BYPASS: "Cloudflare was told not to cache it: by the origin's headers (for example Set-Cookie or no-store) or by a rule.",
+  MISS: "Cloudflare could cache it, but did not have it yet.",
+  EXPIRED: "Cloudflare had it, but its time ran out, so it went back to the origin.",
+  HIT: "Served from Cloudflare's cache.",
+  STALE: "Served stale from Cloudflare's cache while the origin was unreachable.",
+  UPDATING: "Served stale from Cloudflare's cache while it fetches a fresh copy.",
+  REVALIDATED: "Cloudflare checked with the origin, and its stored copy was still good.",
+};
+
+interface Diff {
+  a: string;
+  b: string;
+  context: string;
+}
+
+// Find the places where two bodies of the same page differ. Works on lines, and on tags for
+// minified HTML, after trimming the common start and end, so it stays linear on big pages.
+export function bodyDiffs(a: string, b: string, max = 8): Diff[] {
+  const split = (s: string) => s.replace(/>\s*</g, ">\n<").split("\n");
+  const la = split(a);
+  const lb = split(b);
+  let start = 0;
+  while (start < la.length && start < lb.length && la[start] === lb[start]) start++;
+  let endA = la.length - 1;
+  let endB = lb.length - 1;
+  while (endA >= start && endB >= start && la[endA] === lb[endB]) {
+    endA--;
+    endB--;
+  }
+  const out: Diff[] = [];
+  if (start > endA && start > endB) return out;
+  // Same number of changed lines: pair them up. Otherwise report the block as one change.
+  const pairs: Array<[string, string]> =
+    endA - start === endB - start
+      ? la.slice(start, endA + 1).map((l, i) => [l, lb[start + i] ?? ""])
+      : [[la.slice(start, endA + 1).join("\n"), lb.slice(start, endB + 1).join("\n")]];
+  for (const [x, y] of pairs) {
+    if (x === y) continue;
+    let p = 0;
+    while (p < x.length && p < y.length && x[p] === y[p]) p++;
+    let s = 0;
+    while (s < x.length - p && s < y.length - p && x[x.length - 1 - s] === y[y.length - 1 - s]) s++;
+    const before = x.slice(Math.max(0, p - 60), p);
+    out.push({ a: x.slice(p, x.length - s), b: y.slice(p, y.length - s), context: before });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+const TOKEN_HINT = /(csrf|xsrf|authenticity_token|requestverificationtoken|__requestverification|_token|anti-?forgery|form_build_id|form_key|wpnonce)/i;
+const NONCE_HINT = /nonce/i;
+const TIME_HINT = /(time|date|timestamp|generated|rendered|\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2})/i;
+const ID_HINT = /(request[-_]?id|trace|session|uuid|visitor|client[-_]?id)/i;
+
+export function classify(d: Diff): "token" | "nonce" | "time" | "id" | "other" {
+  const around = d.context.slice(-80) + d.a.slice(0, 80);
+  if (TOKEN_HINT.test(around)) return "token";
+  if (NONCE_HINT.test(around)) return "nonce";
+  if (ID_HINT.test(around)) return "id";
+  if (TIME_HINT.test(around)) return "time";
+  return "other";
+}
+
+function mask(s: string): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > 12 ? `${t.slice(0, 4)}...(${t.length} chars)` : t;
+}
+
+function show(context: string): string {
+  return context.replace(/\s+/g, " ").trim().slice(-50);
+}
+
+export function diagnose(url: string, a: Snapshot, b?: Snapshot): Diagnosis {
+  const f: Finding[] = [];
+  const add = (id: string, severity: Severity, title: string, detail: string, fix: string) =>
+    f.push({ id, severity, title, detail, fix });
+  const h = a.headers;
+
+  // Targeted headers (RFC 9213) win over Cache-Control at CDNs that support them.
+  const targetedName = ["cloudflare-cdn-cache-control", "cdn-cache-control", "surrogate-control"].find((n) => h[n]);
+  const cc = parseCacheControl(h["cache-control"]);
+  const shared = targetedName ? parseCacheControl(h[targetedName]) : cc;
+  if (targetedName) {
+    add("targeted-cache-control", "info", `${targetedName} is set`,
+      `CDNs that support it use "${h[targetedName]}" instead of Cache-Control ("${h["cache-control"] ?? "none"}"). Browsers keep using Cache-Control.`,
+      "Nothing to fix. This is the clean way to give the CDN and browsers different rules.");
+  }
+
+  const sMax = seconds(shared.get("s-maxage"));
+  const maxAge = seconds(shared.get("max-age"));
+  const date = Date.parse(h["date"] ?? "") || Date.now();
+  const expiresRaw = h["expires"];
+  const expires = expiresRaw !== undefined ? Date.parse(expiresRaw) : NaN;
+  let ttl: number | null = sMax ?? maxAge ?? null;
+  if (ttl === null && expiresRaw !== undefined) ttl = Number.isNaN(expires) ? 0 : Math.max(0, Math.round((expires - date) / 1000));
+  const explicit = ttl !== null;
+
+  // 1. Status code.
+  if (!CACHEABLE_BY_DEFAULT.has(a.status) && !explicit) {
+    add("status", "blocks", `Status ${a.status} is not cached unless it says for how long`,
+      `Caches store ${[...CACHEABLE_BY_DEFAULT].join(", ")} by default. Other statuses need an explicit lifetime.`,
+      a.status >= 300 && a.status < 400
+        ? "For a redirect that will not change, use 301 or 308. For a temporary one, add Cache-Control: s-maxage=60."
+        : "If this response is safe to share, add Cache-Control: public, s-maxage=<seconds>.");
+  } else if (a.status >= 500) {
+    add("error-status", "info", `Status ${a.status}`, "This is an error response, so the diagnosis is about the error page.",
+      "Add stale-if-error=86400 to Cache-Control so a cache can keep serving the last good page during outages.");
+  }
+
+  // 2. Cache-Control directives that stop a shared cache.
+  if (shared.has("no-store")) {
+    add("no-store", "blocks", "Cache-Control: no-store",
+      "No cache, shared or private, may keep a copy of this response.",
+      "Keep no-store for pages with personal data. For public pages, remove it and send Cache-Control: public, max-age=0, s-maxage=300 (fresh at the CDN for 5 minutes, always checked by browsers).");
+  }
+  const priv = shared.get("private");
+  if (priv === true) {
+    add("private", "blocks", "Cache-Control: private",
+      "Only the visitor's own browser may store this. CDNs and shared proxies must not.",
+      "If every anonymous visitor gets the same page, replace private with public, s-maxage=<seconds>. If it is personal, it is right as it is.");
+  } else if (typeof priv === "string") {
+    add("private-fields", "info", `Cache-Control: private="${priv}"`,
+      `A shared cache may store the response but must drop these headers: ${priv}.`, "Nothing to fix if that is intended.");
+  }
+  const noCache = shared.get("no-cache");
+  const validators = Boolean(h["etag"] || h["last-modified"]);
+  if (noCache === true || (sMax === null && maxAge === 0) || sMax === 0) {
+    const what = noCache === true ? "Cache-Control: no-cache" : "a lifetime of 0 seconds";
+    add("revalidate-always", "hurts", `Every request goes back to the origin (${what})`,
+      validators
+        ? "A cache may store it, but must check with the origin before every use. With ETag or Last-Modified that check can be a quick 304, but it is still a round trip to the origin."
+        : "A cache must check with the origin before every use, and without ETag or Last-Modified that check downloads the whole response again.",
+      "Give the CDN a short lifetime even if browsers get none: Cache-Control: max-age=0, s-maxage=60, stale-while-revalidate=300.");
+  }
+
+  // 3. Expires and Pragma.
+  if (expiresRaw !== undefined && sMax === null && maxAge === null && (Number.isNaN(expires) || expires <= date)) {
+    add("expires-past", "hurts", `Expires is in the past or invalid ("${expiresRaw}")`,
+      "With no max-age, an Expires date that has passed (or is not a date, like 0) makes the response stale at once.",
+      "Send Cache-Control with s-maxage instead; it overrides Expires.");
+  }
+  if (h["pragma"]?.toLowerCase().includes("no-cache") && !h["cache-control"]) {
+    add("pragma", "info", "Pragma: no-cache without Cache-Control",
+      "Pragma is from HTTP/1.0. Modern caches mostly ignore it, but some treat it like no-cache.",
+      "Remove Pragma and send a Cache-Control header.");
+  }
+
+  // 4. Cookies. Edge cookies (bot shields, load balancers at the CDN) are added after the cache.
+  const allNames = [...new Set(a.setCookies.map(cookieName))];
+  const names = allNames.filter((n) => !EDGE_COOKIES.test(n));
+  const edge = allNames.filter((n) => EDGE_COOKIES.test(n));
+  if (names.length) {
+    add("set-cookie", "blocks", `Sets ${names.length === 1 ? "a cookie" : `${names.length} cookies`} on an anonymous visit: ${names.join(", ")}`,
+      "Shared caches do not store a response that sets a cookie (Cloudflare does not, by default): the same cookie would be handed to every visitor. A first visit with no cookies should not need one.",
+      "Set session cookies only after login or on POST. Move consent or analytics cookies to JavaScript, or set them from a separate uncached request.");
+  }
+  if (edge.length) {
+    add("edge-cookie", "info", `Edge cookie${edge.length > 1 ? "s" : ""} from the CDN: ${edge.join(", ")}`,
+      "These are added by the CDN's bot or load-balancing features at the edge, after the cache lookup. They are not stored with the page.",
+      "Nothing to fix for caching.");
+  }
+
+  // 5. Vary.
+  const vary = list(h["vary"]);
+  if (vary.includes("*")) {
+    add("vary-star", "blocks", "Vary: *", "Every request counts as different, so nothing can be reused.", "Name the request headers that really change the response, or drop Vary.");
+  }
+  for (const v of vary) {
+    if (v === "cookie" || v === "authorization") {
+      add(`vary-${v}`, "hurts", `Vary: ${v}`,
+        `Every distinct ${v} header is its own cache entry. Anonymous visitors without cookies can share one copy, but anyone with any cookie (analytics, consent) gets a miss.`,
+        "Serve the anonymous page from a URL or path that does not vary by cookie, or strip non-session cookies at the edge before the cache key is built.");
+    } else if (v === "user-agent") {
+      add("vary-user-agent", "hurts", "Vary: User-Agent",
+        "There are thousands of User-Agent strings, so the hit rate collapses.",
+        "Use responsive HTML and CSS instead, or vary on a small header you control (for example a device class set at the edge).");
+    } else if (v === "accept-language") {
+      add("vary-accept-language", "hurts", "Vary: Accept-Language",
+        "Browsers send many slightly different Accept-Language values, so one page splits into many entries.",
+        "Put the language in the URL (/en/, /ar/) and drop the Vary.");
+    }
+  }
+
+  // 6. No lifetime at all.
+  const type = (h["content-type"] ?? "").toLowerCase();
+  if (!explicit && !shared.has("no-store") && priv !== true && noCache !== true && a.status < 400) {
+    if (STATIC_TYPES.test(type)) {
+      add("no-lifetime-static", "info", "No lifetime given for a static file",
+        "CDNs cache common static file types by default, with their own default lifetime. Browsers guess from Last-Modified.",
+        "For files with a hash in the name, send Cache-Control: public, max-age=31536000, immutable.");
+    } else {
+      add("no-lifetime", "hurts", "No lifetime given (no max-age, s-maxage or Expires)",
+        `A cache has to guess. Many CDNs do not cache ${type.split(";")[0] || "this content type"} at all without a lifetime; Cloudflare caches HTML only when a Cache Rule says so.`,
+        "Send Cache-Control: public, max-age=0, s-maxage=300, stale-while-revalidate=60 for pages that are the same for every anonymous visitor.");
+    }
+  } else if (ttl !== null && ttl > 0 && ttl < 60) {
+    add("short-ttl", "info", `Short shared lifetime: ${ttl} s`, "The CDN will go back to the origin at least once a minute per location.",
+      "If the content can be a little stale, add stale-while-revalidate so visitors never wait for the refresh.");
+  }
+
+  // 7. Query string noise in the URL itself.
+  try {
+    const params = [...new URL(url).searchParams.keys()];
+    const tracking = params.filter((p) => TRACKING.test(p));
+    const busters = params.filter((p) => BUSTERS.test(p));
+    if (tracking.length) {
+      add("tracking-params", "hurts", `Tracking parameters in the URL: ${tracking.join(", ")}`,
+        "Each different value is a different cache key, so every campaign link is a cold miss for the same page.",
+        "Leave these parameters out of the cache key (on Cloudflare: a Cache Rule, Cache key, Query string, Exclude), or strip them at the edge.");
+    }
+    if (busters.length) {
+      add("cache-buster", "info", `Possible cache buster in the URL: ${busters.join(", ")}`,
+        "A parameter that changes on every request makes every request a miss.",
+        "Use a content hash in the file name instead, and long lifetimes.");
+    }
+  } catch {
+    // not a URL we can parse; nothing to say about its query
+  }
+
+  // 8. Per-visitor content: the two anonymous fetches should be identical.
+  if (b && a.status === b.status && a.status === 200 && /^(text\/|application\/(json|xml|xhtml))/.test(type)) {
+    const diffs = bodyDiffs(a.body, b.body);
+    const kinds = new Map<string, Diff[]>();
+    for (const d of diffs) {
+      const k = classify(d);
+      kinds.set(k, [...(kinds.get(k) ?? []), d]);
+    }
+    const tokens = kinds.get("token") ?? [];
+    if (tokens.length) {
+      add("csrf-token", "blocks", "The page carries a per-visitor form token (CSRF)",
+        `Two anonymous requests got different tokens, for example after "${show(tokens[0]!.context)}": ${mask(tokens[0]!.a)} then ${mask(tokens[0]!.b)}. A cache would hand one visitor's token to everyone, and their forms would fail.`,
+        "Fetch the token with JavaScript from a small uncached endpoint when the form is used, or use SameSite cookies plus a double-submit token set at the edge.");
+    }
+    const nonces = kinds.get("nonce") ?? [];
+    const cspA = h["content-security-policy"] ?? "";
+    const cspB = b.headers["content-security-policy"] ?? "";
+    if (nonces.length || (cspA.includes("nonce-") && cspA !== cspB)) {
+      add("csp-nonce", "blocks", "The page uses a fresh CSP nonce on every response",
+        "A cached copy would serve the same nonce to everyone, which defeats the nonce. So the page cannot be cached as it is.",
+        "Use script hashes instead of nonces, or have the edge put a fresh nonce into each cached copy (an HTMLRewriter in a Cloudflare Worker does this).");
+    }
+    const rest = [...(kinds.get("id") ?? []), ...(kinds.get("time") ?? []), ...(kinds.get("other") ?? [])];
+    if (rest.length) {
+      const d = rest[0]!;
+      add("body-varies", tokens.length || nonces.length ? "info" : "hurts", `The body changes between two anonymous requests (${rest.length} place${rest.length > 1 ? "s" : ""})`,
+        `For example after "${show(d.context)}": ${mask(d.a)} then ${mask(d.b)}. If this is a timestamp or request id it is harmless but means the page is built per request; if it is per-visitor data, caching would leak it.`,
+        "Move per-request values out of the HTML (into headers or a small API call), so the page itself is the same for everyone.");
+    }
+  }
+
+  // 9. What the CDN in front says, if there is one. A HIT is proof the CDN caches the page,
+  // whatever the headers we see say: CDNs often get their own instructions from the origin
+  // (Surrogate-Control, rules) and remove them before the response reaches a visitor.
+  const cdnName = detectCdn(h);
+  const statuses = [cacheStatus(h), b ? cacheStatus(b.headers) : ""].filter(Boolean);
+  const last = (statuses[statuses.length - 1] ?? "").trim();
+  const hit = Boolean(b) && SERVED_FROM_CACHE.test(last);
+  if (cdnName) {
+    const meaning = cdnName === "Cloudflare" ? CF_STATUS[last.toUpperCase()] : undefined;
+    add("cdn", "info", `${cdnName} is in front${statuses.length ? `: ${statuses.join(", then ")}` : ""}`,
+      (meaning ?? (hit ? "The second request was served from the cache." : "Cache status as reported by the CDN.")) +
+        (hit ? " The other findings are about what browsers and any cache after the CDN see." : ""),
+      hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
+  }
+
+  const order: Record<Severity, number> = { blocks: 0, hurts: 1, info: 2 };
+  f.sort((x, y) => order[x.severity] - order[y.severity]);
+  const verdict = hit
+    ? "cached-at-cdn"
+    : f.some((x) => x.severity === "blocks")
+      ? "not-cacheable"
+      : f.some((x) => x.severity === "hurts")
+        ? "cacheable-with-issues"
+        : "cacheable";
+  return { url, verdict, ttl, cdn: cdnName ? { name: cdnName, status: statuses } : null, findings: f };
+}

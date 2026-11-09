@@ -1,0 +1,43 @@
+{
+  "name": "cache-doctor",
+  "version": "0.1.0",
+  "description": "Why is this page not cached? Explains every reason a response cannot be shared from a CDN cache, with the fix for each.",
+  "license": "MIT",
+  "author": "Ahmed Abied",
+  "type": "module",
+  "bin": {
+    "cache-doctor": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
+    "test": "node --test test/",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ahmedabied/cache-doctor"
+  },
+  "keywords": [
+    "cdn",
+    "cache",
+    "cache-control",
+    "cloudflare",
+    "http",
+    "performance",
+    "cli"
+  ],
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261109.1",
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.158.0"
+  }
+}
