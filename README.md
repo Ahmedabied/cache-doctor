@@ -52,7 +52,7 @@ It asks for the page twice, back to back, with no cookies, and compares the two 
 | Vary | `*`, `Cookie`, `Authorization`, `User-Agent`, `Accept-Language` |
 | The URL | tracking parameters (`utm_*`, `gclid`, `fbclid` and others) that split the cache key, and cache busters |
 | The body | what differs between the two anonymous responses: per-visitor CSRF tokens, CSP nonces, timestamps and request ids, shown with their context and the values masked |
-| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, Azure Front Door, Bunny, LiteSpeed, Varnish (two ids in `X-Varnish` mean a hit), nginx's `X-Cache-Status`, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker. Edge cookies and load balancer stickiness cookies (`AWSALB`, `BIGipServer...`, `ARRAffinity`) are left out of that comparison, so a balancer in front of Varnish that issues a new `AWSALB` on every response cannot hide a stored session cookie. A cookie it does not know, set fresh on every request, still would |
+| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, Azure Front Door, Bunny, LiteSpeed, Varnish (two ids in `X-Varnish` mean a hit), Google's front end (`Via: 1.1 google`), nginx's `X-Cache-Status`, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). With no status header at all (Google Cloud CDN sends none), `Age` decides: above 0, or appearing on the second request after none on the first, means a cache served it (RFC 9111, 5.1); `Age: 0` on both says nothing. A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker. Edge cookies and load balancer stickiness cookies (`AWSALB`, `BIGipServer...`, `ARRAffinity`) are left out of that comparison, so a balancer in front of Varnish that issues a new `AWSALB` on every response cannot hide a stored session cookie. A cookie it does not know, set fresh on every request, still would |
 
 31 finding types in all, each with a test.
 
@@ -64,8 +64,8 @@ shops), two anonymous requests each, on 2026-11-09 (rerun with the current rules
 | | |
 |---|---|
 | sites that answered | 49 |
-| time to diagnose, median | 605 ms (both fetches and the analysis) |
-| time to diagnose, p90 | 2.1 s |
+| time to diagnose, median | 639 ms (both fetches and the analysis) |
+| time to diagnose, p90 | 1.6 s |
 | already served from their CDN's cache | 22 (45%) |
 | cannot be shared from a cache as served | 11 (22%) |
 | refused an unknown client | 9 (18%) |
@@ -73,7 +73,9 @@ shops), two anonymous requests each, on 2026-11-09 (rerun with the current rules
 | send a fresh CSP nonce on every response | 5 (10%) |
 | hand one visitor's cookie to everyone from the cache | 0 |
 
-Six sites report their cache only in nginx-style headers (`X-Proxy-Cache`, `X-Cache-Status`), which an earlier
+Reading `Age` when there is no status header changed none of these 49 sites. It matters for caches that send only
+`Age`: Google's static files (`gstatic.com`, about two days old in the cache) read as "cacheable" before and as a hit
+now. Six sites report their cache only in nginx-style headers (`X-Proxy-Cache`, `X-Cache-Status`), which an earlier
 version did not read; the run just before reading them counted 20 served from cache. The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
 visitor id on every hit, next to constant flags like `none` and `1` that were the same both times. A stored
 response repeats every cookie exactly, so the rule now asks for that, and for a value long enough to identify
@@ -118,7 +120,7 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
 
 ```sh
 npm ci
-npm test            # 40 tests: every finding, the probe and CLI against a local server
+npm test            # 41 tests: every finding, the probe and CLI against a local server
 npm run typecheck   # the library and the Worker
 npm run compile     # rebuild dist/src (committed, so `npx github:` needs no dev tools; CI checks it is current)
 npx wrangler dev    # the page on localhost:8787

@@ -70,10 +70,20 @@ const STATUS_HEADERS = ["cf-cache-status", "x-vercel-cache", "cache-status", "ak
 // Varnish with no status header: X-Varnish holds this request's id, then the id of the request that stored the
 // object. Two ids: it came from the cache.
 const varnishIds = (h) => (h["x-varnish"] ?? "").trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
-export function servedFromCache(h) {
+// No status header at all (Google Cloud CDN sends none): Age means a cache served it, since a response carrying Age
+// "was not generated or validated by the origin server for this request" (RFC 9111, 5.1). Age 0 counts only when it
+// appeared on the second request after none on the first: stored by the first, served within the same second.
+// An Age of 0 on both is what some origins and pass-through proxies send every time, so it says nothing.
+function ageSaysStored(h, first) {
+    const raw = (h["age"] ?? "").trim();
+    if (!/^\d+$/.test(raw))
+        return false;
+    return Number(raw) > 0 || (first !== undefined && first["age"] === undefined);
+}
+export function servedFromCache(h, first) {
     const name = STATUS_HEADERS.find((n) => h[n]);
     if (!name)
-        return varnishIds(h).length === 2;
+        return varnishIds(h).length === 2 || ageSaysStored(h, first);
     if (name === "cache-status")
         return parseCacheStatus(h[name]).some((m) => m.params.get("hit") === true);
     return wordHit(h[name]);
@@ -156,6 +166,9 @@ export function detectCdn(h) {
         return "LiteSpeed";
     if (h["x-varnish"])
         return "Varnish";
+    // Google's front end (Cloud CDN, and the load balancer in front of Cloud Run and App Engine) adds this Via.
+    if (/(^|,)\s*1\.1 google\b/i.test(h["via"] ?? ""))
+        return "Google Cloud";
     if (STATUS_HEADERS.some((n) => h[n]) || h["age"])
         return "a cache";
     return null;
@@ -415,7 +428,7 @@ export function diagnose(url, a, b, opts = {}) {
     const cdnName = detectCdn(h);
     const statuses = [cacheStatus(h), b ? cacheStatus(b.headers) : ""].filter(Boolean);
     const last = (statuses[statuses.length - 1] ?? "").trim();
-    const hit = Boolean(b) && servedFromCache(b.headers);
+    const hit = Boolean(b) && servedFromCache(b.headers, h);
     // A cached Set-Cookie: a stored response repeats ALL of its cookies, value for value. If any cookie
     // differs between the two hits, cookies are being set per request after the cache (an edge function
     // adding a visitor id), and the identical ones are just constants. Seen on real sites: a fresh visitor

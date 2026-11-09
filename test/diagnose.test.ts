@@ -352,3 +352,22 @@ test("more CDN and cache status formats: Bunny, Azure Front Door, nginx, LiteSpe
   assert.deepEqual(varnishHit.cdn?.status, ["HIT (X-Varnish 32770 3)", "HIT (X-Varnish 32770 3)"]);
   assert.notEqual(seen({ "x-varnish": "32770" }).verdict, "cached-at-cdn");
 });
+
+test("a cache that only says Age: Google's front end, a hit in the same second, and an origin that always sends 0", () => {
+  const base = { "cache-control": "public, max-age=300" };
+  const pair = (a: Record<string, string>, b: Record<string, string>) =>
+    diagnose("u", snap({ ...base, ...a }), snap({ ...base, ...b }));
+  // Cloud CDN sends no status header; a stored response carries Age (RFC 9111, 5.1).
+  const gcdn = pair({ via: "1.1 google" }, { via: "1.1 google", age: "12" });
+  assert.equal(gcdn.cdn?.name, "Google Cloud");
+  assert.equal(gcdn.verdict, "cached-at-cdn");
+  // Stored on the first request and served on the second within a second: Age 0, but it appeared.
+  assert.equal(pair({ via: "1.1 google" }, { via: "1.1 google", age: "0" }).verdict, "cached-at-cdn");
+  assert.equal(pair({ age: "40" }, { age: "41" }).verdict, "cached-at-cdn");
+  // An origin (or a cache that passed it through) saying Age: 0 every time is not a hit.
+  assert.notEqual(pair({ age: "0" }, { age: "0" }).verdict, "cached-at-cdn");
+  // No Age at all on the second request: nothing says it was stored.
+  assert.notEqual(pair({ via: "1.1 google" }, { via: "1.1 google" }).verdict, "cached-at-cdn");
+  // A real status header still decides over Age.
+  assert.notEqual(pair({ "x-cache": "MISS" }, { "x-cache": "MISS", age: "5" }).verdict, "cached-at-cdn");
+});
