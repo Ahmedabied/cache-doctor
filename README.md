@@ -52,7 +52,7 @@ It asks for the page twice, back to back, with no cookies, and compares the two 
 | Vary | `*`, `Cookie`, `Authorization`, `User-Agent`, `Accept-Language` |
 | The URL | tracking parameters (`utm_*`, `gclid`, `fbclid` and others) that split the cache key, and cache busters |
 | The body | what differs between the two anonymous responses: per-visitor CSRF tokens, CSP nonces, timestamps and request ids, shown with their context and the values masked |
-| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker |
+| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker. Edge cookies this tool knows about are left out of that comparison; one it does not know, set fresh on every request, would hide a stored cookie |
 
 31 finding types in all, each with a test.
 
