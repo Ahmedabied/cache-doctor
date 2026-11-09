@@ -532,10 +532,15 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
       "Both requests were cache hits with exactly the same short cookie values (like 1 or none). Nobody's identity leaks, but each cached page view resets whatever the visitor's own cookie said.",
       "Set preference cookies from JavaScript or a small uncached request, not on the cached page.");
   }
+  // Inside a Worker an Age with no status header may be Cloudflare's own subrequest cache, not the site's CDN.
+  const ageOnly = cdnName === "a cache" && !STATUS_HEADERS.some((n) => h[n] || b?.headers[n]);
   if (cdnName) {
     const meaning = cdnName === "Cloudflare" ? CF_STATUS[last.toUpperCase()] : undefined;
+    const said = ageOnly && opts.insideCloudflare
+      ? "Only an Age header, and this web checker runs on Cloudflare, whose own subrequest cache can answer and set Age itself, so it is not counted as the site's cache."
+      : "Cache status as reported by the CDN.";
     add("cdn", "info", `${cdnName} is in front${statuses.length ? `: ${statuses.join(", then ")}` : ""}`,
-      (meaning ?? (hit ? "The second request was served from the cache." : "Cache status as reported by the CDN.")) +
+      (meaning ?? (hit ? "The second request was served from the cache." : said)) +
         (hit && !leaked ? " The other findings are about what browsers and any cache after the CDN see." : ""),
       leaked ? "Purge this URL once the cookie is gone." : hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
   }

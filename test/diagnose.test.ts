@@ -376,4 +376,10 @@ test("a cache that only says Age: Google's front end, a hit in the same second, 
     diagnose("u", snap({ ...base, ...a }), snap({ ...base, ...b }), { insideCloudflare: true });
   assert.notEqual(inCf({}, { age: "0" }).verdict, "cached-at-cdn");
   assert.notEqual(inCf({}, { age: "3" }).verdict, "cached-at-cdn");
+  // And the info line does not present that Age as the site's CDN talking (seen live: "as reported by the CDN").
+  const cdn = inCf({ age: "6537" }, { age: "6537" }).findings.find((x) => x.id === "cdn")!;
+  assert.match(cdn.detail, /subrequest cache/);
+  assert.doesNotMatch(cdn.detail, /as reported by the CDN/);
+  // Outside a Worker the same headers still read as the site's own cache.
+  assert.doesNotMatch(pair({ age: "6537" }, { age: "6537" }).findings.find((x) => x.id === "cdn")!.detail, /subrequest/);
 });
