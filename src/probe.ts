@@ -23,6 +23,7 @@ export interface Hop {
 export interface Report extends Diagnosis {
   redirects: Hop[];
   status: number;
+  server: string;
   contentType: string;
   bytes: number;
   ms: number;
@@ -106,6 +107,7 @@ export async function check(target: string, opts: ProbeOptions = {}): Promise<Re
     ...d,
     redirects: first.hops,
     status: first.snap.status,
+    server: opts.insideCloudflare ? "" : clean(first.snap.headers["server"] ?? ""),
     contentType: first.snap.headers["content-type"] ?? "",
     bytes: first.snap.bytes,
     ms: performance.now() - t0,

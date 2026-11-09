@@ -30,6 +30,7 @@ export const PAGE = `<!doctype html>
   <footer>
     <p>Open source, MIT: <a href="https://github.com/Ahmedabied/cache-doctor">github.com/Ahmedabied/cache-doctor</a>. It is also a command line tool.</p>
     <p>Only the diagnosis comes back, never the page. Each URL is checked at most once a minute; repeats come from the cache. This page passes its own check.</p>
+    <p>The checks run on Cloudflare, which hides Cloudflare's own cache status from them, and some sites refuse requests from cloud servers. The command line tool, run from your machine, sees both: <code>npx github:Ahmedabied/cache-doctor &lt;url&gt;</code></p>
   </footer>
 </main>
 </body>
@@ -90,6 +91,7 @@ button[disabled] { opacity: .5; cursor: progress; }
 footer { margin-top: 64px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); padding-top: 20px; }
 footer p { margin: 0 0 6px; }
 a { color: var(--accent); }
+code { font: 13px ${MONO}; }
 @media (max-width: 560px) { h1 { font-size: 31px; } main { padding-top: 44px; } form { flex-direction: column; } button[type=submit] { padding: 14px; } }
 `;
 

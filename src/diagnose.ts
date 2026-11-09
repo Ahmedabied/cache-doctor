@@ -75,15 +75,16 @@ function cookieName(c: string): string {
 
 export interface DiagnoseOptions {
   // Set when the probe itself runs on Cloudflare (a Worker). Cloudflare's fetch path then adds
-  // cf-cache-status to every response, even from sites that are not on Cloudflare, so only a
-  // "server: cloudflare" header counts as Cloudflare being in front.
+  // cf-* headers and rewrites "server" to "cloudflare" on every response, even from sites that
+  // are not on Cloudflare, so none of those headers can be trusted and all of them are ignored.
   insideCloudflare?: boolean;
 }
 
 function ownCfHeaders(h: Record<string, string>, opts: DiagnoseOptions): Record<string, string> {
-  if (!opts.insideCloudflare || (h["server"] ?? "").toLowerCase() === "cloudflare") return h;
+  if (!opts.insideCloudflare) return h;
   const rest = { ...h };
   for (const k of Object.keys(rest)) if (k.startsWith("cf-")) delete rest[k];
+  if ((rest["server"] ?? "").toLowerCase() === "cloudflare") delete rest["server"];
   return rest;
 }
 

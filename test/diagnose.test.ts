@@ -171,12 +171,16 @@ test("a refused check is not diagnosed as the page", () => {
   assert.equal(challenge.verdict, "refused");
 });
 
-test("inside a Worker, cf-* headers only count when the server is Cloudflare", () => {
-  const added = { "cache-control": "s-maxage=60", "cf-cache-status": "DYNAMIC", server: "nginx" };
-  const outside = diagnose("u", snap(added), snap(added));
-  assert.equal(outside.cdn?.name, "Cloudflare"); // from a laptop, cf-cache-status means Cloudflare
+test("inside a Worker, headers Cloudflare adds to every fetch are ignored", () => {
+  // Measured on the live Worker: a fetch of a site on Fastly came back with
+  // server: cloudflare and cf-cache-status: DYNAMIC added by Cloudflare itself.
+  const added = { "cache-control": "s-maxage=60", "cf-cache-status": "DYNAMIC", "cf-ray": "1", server: "cloudflare" };
+  assert.equal(diagnose("u", snap(added), snap(added)).cdn?.name, "Cloudflare"); // from a laptop it is real
   const inside = diagnose("u", snap(added), snap(added), { insideCloudflare: true });
   assert.equal(inside.cdn, null);
-  const real = { "cache-control": "s-maxage=60", "cf-cache-status": "HIT", server: "cloudflare" };
-  assert.equal(diagnose("u", snap(real), snap(real), { insideCloudflare: true }).verdict, "cached-at-cdn");
+  assert.equal(inside.verdict, "cacheable");
+  const fastly = { ...added, "x-served-by": "cache-lhr1", "x-cache": "HIT" };
+  const f = diagnose("u", snap(fastly), snap(fastly), { insideCloudflare: true });
+  assert.equal(f.cdn?.name, "Fastly");
+  assert.deepEqual(f.cdn?.status, ["HIT", "HIT"]);
 });
