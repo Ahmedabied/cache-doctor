@@ -10,6 +10,8 @@ export interface ProbeOptions {
   fetch?: typeof fetch;
   // Called for every URL before it is fetched, redirects included. Throw to refuse it.
   allow?: (url: URL) => void;
+  // True when running in a Cloudflare Worker (see DiagnoseOptions).
+  insideCloudflare?: boolean;
 }
 
 export interface Hop {
@@ -90,7 +92,7 @@ export async function check(target: string, opts: ProbeOptions = {}): Promise<Re
   const t0 = performance.now();
   const first = await snapshot(target, opts);
   const second = await snapshot(first.snap.url, { ...opts, maxRedirects: 0 });
-  const d = diagnose(first.snap.url, first.snap, second.snap);
+  const d = diagnose(first.snap.url, first.snap, second.snap, { insideCloudflare: opts.insideCloudflare });
   if (first.hops.length) {
     d.findings.push({
       id: "redirects",

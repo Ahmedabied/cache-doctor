@@ -24,7 +24,7 @@ export interface Snapshot {
 
 export interface Diagnosis {
   url: string;
-  verdict: "cached-at-cdn" | "cacheable" | "cacheable-with-issues" | "not-cacheable";
+  verdict: "refused" | "cached-at-cdn" | "cacheable" | "cacheable-with-issues" | "not-cacheable";
   ttl: number | null;
   cdn: { name: string; status: string[] } | null;
   findings: Finding[];
@@ -73,8 +73,24 @@ function cookieName(c: string): string {
   return (c.split(";")[0] ?? "").split("=")[0]?.trim() || "(unnamed)";
 }
 
+export interface DiagnoseOptions {
+  // Set when the probe itself runs on Cloudflare (a Worker). Cloudflare's fetch path then adds
+  // cf-cache-status to every response, even from sites that are not on Cloudflare, so only a
+  // "server: cloudflare" header counts as Cloudflare being in front.
+  insideCloudflare?: boolean;
+}
+
+function ownCfHeaders(h: Record<string, string>, opts: DiagnoseOptions): Record<string, string> {
+  if (!opts.insideCloudflare || (h["server"] ?? "").toLowerCase() === "cloudflare") return h;
+  const rest = { ...h };
+  for (const k of Object.keys(rest)) if (k.startsWith("cf-")) delete rest[k];
+  return rest;
+}
+
+const REFUSED = new Set([401, 403, 407, 419, 429]);
+
 export function detectCdn(h: Record<string, string>): string | null {
-  if (h["cf-cache-status"] || h["cf-ray"]) return "Cloudflare";
+  if (h["cf-cache-status"] || h["cf-ray"] || (h["server"] ?? "").toLowerCase() === "cloudflare") return "Cloudflare";
   if (h["x-vercel-cache"] || h["x-vercel-id"]) return "Vercel";
   if (h["x-amz-cf-id"] || /cloudfront/i.test(h["via"] ?? "") || /cloudfront/i.test(h["x-cache"] ?? "")) return "CloudFront";
   if (h["x-served-by"]?.includes("cache-") || h["fastly-debug-digest"] || /fastly/i.test(h["x-cache"] ?? "")) return "Fastly";
@@ -169,11 +185,21 @@ function show(context: string): string {
   return context.replace(/\s+/g, " ").trim().slice(-50);
 }
 
-export function diagnose(url: string, a: Snapshot, b?: Snapshot): Diagnosis {
+export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseOptions = {}): Diagnosis {
   const f: Finding[] = [];
   const add = (id: string, severity: Severity, title: string, detail: string, fix: string) =>
     f.push({ id, severity, title: clean(title), detail: clean(detail), fix: clean(fix) });
+  a = { ...a, headers: ownCfHeaders(a.headers, opts) };
+  if (b) b = { ...b, headers: ownCfHeaders(b.headers, opts) };
   const h = a.headers;
+
+  // The site would not show us the page: diagnosing the refusal would mislead.
+  if (REFUSED.has(a.status) || (a.status === 503 && /challenge/i.test(h["cf-mitigated"] ?? ""))) {
+    add("refused", "info", `The site refused the check with status ${a.status}`,
+      "Many sites turn away requests from cloud servers or unknown clients, so this is the refusal, not the page. Nothing here says how the real page is cached.",
+      "Run the command line tool from your own machine (npx github:Ahmedabied/cache-doctor <url>), or check a page you own.");
+    return { url, verdict: "refused", ttl: null, cdn: null, findings: f };
+  }
 
   // Targeted headers (RFC 9213) win over Cache-Control at CDNs that support them.
   const targetedName = ["cloudflare-cdn-cache-control", "cdn-cache-control", "surrogate-control"].find((n) => h[n]);

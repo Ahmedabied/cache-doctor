@@ -79,6 +79,7 @@ export default {
       const report = await check(target.toString(), {
         timeoutMs: 8000,
         maxBytes: 200 * 1024,
+        insideCloudflare: true,
         allow: (u) => {
           const r = refuse(u, here.hostname);
           if (r) throw new Error(`a redirect went somewhere refused (${r})`);

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // cache-doctor <url> [--json] [--timeout ms]
-// Exit code: 0 cached or cacheable (maybe with issues), 1 not cacheable, 2 error.
+// Exit code: 0 cached or cacheable (maybe with issues), 1 not cacheable, 2 error or refused by the site.
 
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { clean } from "./diagnose.ts";
 import { check, type Report } from "./probe.ts";
 
@@ -9,6 +11,7 @@ const color = process.stdout.isTTY && !process.env["NO_COLOR"];
 const paint = (code: string, s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` : s);
 const LABEL = { blocks: paint("1;31", "BLOCKS"), hurts: paint("1;33", "HURTS "), info: paint("2", "info  ") };
 const VERDICT = {
+  refused: paint("1;33", "the site refused the check"),
   "cached-at-cdn": paint("1;32", "cached at the CDN (seen as a hit)"),
   "not-cacheable": paint("1;31", "not cacheable at a shared cache"),
   "cacheable-with-issues": paint("1;33", "cacheable, but with problems"),
@@ -77,12 +80,19 @@ async function main(argv: string[]): Promise<number> {
   try {
     const r = await check(target.toString(), { timeoutMs });
     console.log(json ? JSON.stringify(r, null, 2) : render(r));
-    return r.verdict === "not-cacheable" ? 1 : 0;
+    return r.verdict === "not-cacheable" ? 1 : r.verdict === "refused" ? 2 : 0;
   } catch (e) {
     console.error(`cache-doctor: ${target}: ${(e as Error).message}`);
     return 2;
   }
 }
 
-const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "");
-if (isMain) main(process.argv).then((code) => process.exit(code));
+// Run when started directly, including through the npm bin symlink.
+function startedDirectly(): boolean {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]!) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+if (startedDirectly()) main(process.argv).then((code) => process.exit(code));

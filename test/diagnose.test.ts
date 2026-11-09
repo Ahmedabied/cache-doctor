@@ -160,3 +160,23 @@ test("server text cannot carry terminal escapes into findings", () => {
   assert.doesNotMatch(d.findings[0]!.title, /[\u001b‮]/);
   assert.equal(clean("ok\u0007"), "ok\\u0007");
 });
+
+test("a refused check is not diagnosed as the page", () => {
+  for (const status of [403, 419, 429]) {
+    const d = run({ "content-type": "text/html" }, { status });
+    assert.equal(d.verdict, "refused");
+    assert.deepEqual(ids(d), ["refused"]);
+  }
+  const challenge = run({ "cf-mitigated": "challenge" }, { status: 503 });
+  assert.equal(challenge.verdict, "refused");
+});
+
+test("inside a Worker, cf-* headers only count when the server is Cloudflare", () => {
+  const added = { "cache-control": "s-maxage=60", "cf-cache-status": "DYNAMIC", server: "nginx" };
+  const outside = diagnose("u", snap(added), snap(added));
+  assert.equal(outside.cdn?.name, "Cloudflare"); // from a laptop, cf-cache-status means Cloudflare
+  const inside = diagnose("u", snap(added), snap(added), { insideCloudflare: true });
+  assert.equal(inside.cdn, null);
+  const real = { "cache-control": "s-maxage=60", "cf-cache-status": "HIT", server: "cloudflare" };
+  assert.equal(diagnose("u", snap(real), snap(real), { insideCloudflare: true }).verdict, "cached-at-cdn");
+});
