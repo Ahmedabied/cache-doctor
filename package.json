@@ -19,8 +19,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
     "test": "node --test \"test/*.test.ts\"",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "prepare": "tsc -p tsconfig.json"
+    "deploy": "wrangler deploy"
   },
   "repository": {
     "type": "git",
