@@ -90,15 +90,20 @@ function wordHit(value: string): boolean {
   return value.split(",").some((part) => {
     const t = part.trim().toLowerCase();
     if (/^(tcp_)?(hit[-_ ]?for[-_ ]?pass|hitpass)/.test(t)) return false;
-    return /^(hit|stale|updating|revalidated|refreshhit|tcp_(mem_|refresh_|ims_)?hit)\b/.test(t);
+    return /^(hit|stale|updating|revalidated|refreshhit|tcp_(mem_|refresh_|ims_|remote_)?hit)\b/.test(t);
   });
 }
 
-const STATUS_HEADERS = ["cf-cache-status", "x-vercel-cache", "cache-status", "akamai-cache-status", "x-cache"];
+// After the CDNs' own headers: Bunny's CDN-Cache, the usual nginx proxy_cache headers, LiteSpeed (common on WordPress).
+const STATUS_HEADERS = ["cf-cache-status", "x-vercel-cache", "cache-status", "akamai-cache-status", "x-cache",
+  "cdn-cache", "x-cache-status", "x-proxy-cache", "x-litespeed-cache"];
+// Varnish with no status header: X-Varnish holds this request's id, then the id of the request that stored the
+// object. Two ids: it came from the cache.
+const varnishIds = (h: Record<string, string>) => (h["x-varnish"] ?? "").trim().split(/\s+/).filter((x) => /^\d+$/.test(x));
 
 export function servedFromCache(h: Record<string, string>): boolean {
   const name = STATUS_HEADERS.find((n) => h[n]);
-  if (!name) return false;
+  if (!name) return varnishIds(h).length === 2;
   if (name === "cache-status") return parseCacheStatus(h[name]!).some((m) => m.params.get("hit") === true);
   return wordHit(h[name]!);
 }
@@ -169,13 +174,20 @@ export function detectCdn(h: Record<string, string>): string | null {
   if (h["x-served-by"]?.includes("cache-") || h["fastly-debug-digest"] || /fastly/i.test(h["x-cache"] ?? "")) return "Fastly";
   if (h["x-nf-request-id"]) return "Netlify";
   if (h["akamai-cache-status"] || h["x-akamai-transformed"]) return "Akamai";
-  if (h["cache-status"] || h["x-cache"] || h["age"]) return "a cache";
+  if (h["x-azure-ref"]) return "Azure Front Door";
+  if (h["cdn-cache"] || /bunnycdn/i.test(h["server"] ?? "")) return "Bunny";
+  if (h["x-litespeed-cache"]) return "LiteSpeed";
+  if (h["x-varnish"]) return "Varnish";
+  if (STATUS_HEADERS.some((n) => h[n]) || h["age"]) return "a cache";
   return null;
 }
 
 export function cacheStatus(h: Record<string, string>): string {
   const name = STATUS_HEADERS.find((n) => h[n]);
-  return (name ? h[name]! : h["age"] ? `age ${h["age"]}` : "").trim();
+  if (name) return h[name]!.trim();
+  const ids = varnishIds(h);
+  if (ids.length) return `${ids.length === 2 ? "HIT" : "MISS"} (X-Varnish ${ids.join(" ")})`;
+  return h["age"] ? `age ${h["age"]}` : "";
 }
 
 const CF_STATUS: Record<string, string> = {

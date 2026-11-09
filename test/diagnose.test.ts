@@ -328,3 +328,27 @@ test("a load balancer cookie still stops a CDN in front of it, with the fix that
   assert.ok(!ids(edge).includes("set-cookie"));
   assert.ok(ids(edge).includes("edge-cookie"));
 });
+
+test("more CDN and cache status formats: Bunny, Azure Front Door, nginx, LiteSpeed, plain Varnish", () => {
+  const base = { "cache-control": "public, s-maxage=600" };
+  const seen = (h: Record<string, string>) => diagnose("u", snap({ ...base, ...h }), snap({ ...base, ...h }));
+  const bunny = seen({ "cdn-cache": "HIT", server: "BunnyCDN-DE1-1054" });
+  assert.equal(bunny.cdn?.name, "Bunny");
+  assert.equal(bunny.verdict, "cached-at-cdn");
+  // Front Door serves from a regional cache as TCP_REMOTE_HIT: still a hit.
+  const afd = seen({ "x-cache": "TCP_REMOTE_HIT", "x-azure-ref": "20261109T120000Z-abc" });
+  assert.equal(afd.cdn?.name, "Azure Front Door");
+  assert.equal(afd.verdict, "cached-at-cdn");
+  assert.notEqual(seen({ "x-cache": "CONFIG_NOCACHE", "x-azure-ref": "r" }).verdict, "cached-at-cdn");
+  assert.equal(seen({ "x-cache-status": "HIT" }).verdict, "cached-at-cdn"); // nginx proxy_cache, the usual header
+  assert.equal(seen({ "x-proxy-cache": "REVALIDATED" }).verdict, "cached-at-cdn");
+  const ls = seen({ "x-litespeed-cache": "hit" });
+  assert.equal(ls.cdn?.name, "LiteSpeed");
+  assert.equal(ls.verdict, "cached-at-cdn");
+  // Varnish with no status header: two transaction ids in X-Varnish mean the object came from the cache.
+  const varnishHit = seen({ "x-varnish": "32770 3" });
+  assert.equal(varnishHit.cdn?.name, "Varnish");
+  assert.equal(varnishHit.verdict, "cached-at-cdn");
+  assert.deepEqual(varnishHit.cdn?.status, ["HIT (X-Varnish 32770 3)", "HIT (X-Varnish 32770 3)"]);
+  assert.notEqual(seen({ "x-varnish": "32770" }).verdict, "cached-at-cdn");
+});
