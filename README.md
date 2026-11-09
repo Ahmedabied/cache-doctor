@@ -63,17 +63,18 @@ shops), two anonymous requests each, on 2026-11-09 (rerun with the current rules
 
 | | |
 |---|---|
-| sites that answered | 48 |
-| time to diagnose, median | 579 ms (both fetches and the analysis) |
-| time to diagnose, p90 | 1.6 s |
-| already served from their CDN's cache | 19 (40%) |
-| cannot be shared from a cache as served | 11 (23%) |
-| refused an unknown client | 9 (19%) |
+| sites that answered | 49 |
+| time to diagnose, median | 605 ms (both fetches and the analysis) |
+| time to diagnose, p90 | 2.1 s |
+| already served from their CDN's cache | 22 (45%) |
+| cannot be shared from a cache as served | 11 (22%) |
+| refused an unknown client | 9 (18%) |
 | set a cookie on an anonymous first visit | 13 (27%) |
 | send a fresh CSP nonce on every response | 5 (10%) |
 | hand one visitor's cookie to everyone from the cache | 0 |
 
-The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
+Two of the 22 say HIT only in nginx-style headers (`X-Proxy-Cache`, `X-Cache-Status`), which an earlier version
+did not read; six sites send them. The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
 visitor id on every hit, next to constant flags like `none` and `1` that were the same both times. A stored
 response repeats every cookie exactly, so the rule now asks for that, and for a value long enough to identify
 someone.
