@@ -477,27 +477,38 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   const last = (statuses[statuses.length - 1] ?? "").trim();
   const hit = Boolean(b) && servedFromCache(b!.headers);
 
-  // A cached Set-Cookie: both anonymous visitors were handed the very same cookie by the cache.
-  // Whoever filled the cache now gives their cookie (a session id, a language choice) to everyone.
+  // A cached Set-Cookie: a stored response repeats ALL of its cookies, value for value. If any cookie
+  // differs between the two hits, cookies are being set per request after the cache (an edge function
+  // adding a visitor id), and the identical ones are just constants. Seen on real sites: a fresh visitor
+  // id next to `consent=none` on both hits.
   const pairs = (s: Snapshot) =>
-    new Set(s.setCookies.map((c) => (c.split(";")[0] ?? "").trim()).filter((p) => p && !EDGE_COOKIES.test(cookieName(p))));
-  const leaked = hit && b ? [...pairs(a)].filter((p) => pairs(b!).has(p)).map(cookieName) : [];
-  if (leaked.length) {
-    add("cached-cookie", "blocks", `The cache hands the same cookie to every visitor: ${[...new Set(leaked)].join(", ")}`,
-      "The second request was a cache hit and came with exactly the same Set-Cookie as the first. Every visitor who gets this cached copy gets that cookie too, which overwrites their own; if it is a session id, they all share one session.",
+    [...new Set(s.setCookies.map((c) => (c.split(";")[0] ?? "").trim()).filter((p) => p && !EDGE_COOKIES.test(cookieName(p))))].sort();
+  const pa = pairs(a);
+  const pb = b ? pairs(b) : [];
+  const repeated = hit && pa.length > 0 && pa.join("\n") === pb.join("\n");
+  // Long enough to tell people apart: a session or visitor id, not "1", "none" or "en".
+  const identifying = repeated ? pa.filter((p) => p.slice(p.indexOf("=") + 1).length >= 16).map(cookieName) : [];
+  const leaked = identifying.length > 0;
+  if (leaked) {
+    add("cached-cookie", "blocks", `The cache hands the same cookie to every visitor: ${identifying.join(", ")}`,
+      "Both requests were cache hits and came with exactly the same cookies, including values long enough to identify someone. Whoever filled the cache gave their cookie to every later visitor; if it is a session id, they all share one session.",
       "Do not set cookies on anonymous visits, or strip Set-Cookie at the edge before the response is stored. Then purge this URL from the cache.");
+  } else if (repeated) {
+    add("cached-cookie-constant", "hurts", `Every cached copy sets the same cookie: ${pa.map(cookieName).join(", ")}`,
+      "Both requests were cache hits with exactly the same short cookie values (like 1 or none). Nobody's identity leaks, but each cached page view resets whatever the visitor's own cookie said.",
+      "Set preference cookies from JavaScript or a small uncached request, not on the cached page.");
   }
   if (cdnName) {
     const meaning = cdnName === "Cloudflare" ? CF_STATUS[last.toUpperCase()] : undefined;
     add("cdn", "info", `${cdnName} is in front${statuses.length ? `: ${statuses.join(", then ")}` : ""}`,
       (meaning ?? (hit ? "The second request was served from the cache." : "Cache status as reported by the CDN.")) +
-        (hit && !leaked.length ? " The other findings are about what browsers and any cache after the CDN see." : ""),
-      leaked.length ? "Purge this URL once the cookie is gone." : hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
+        (hit && !leaked ? " The other findings are about what browsers and any cache after the CDN see." : ""),
+      leaked ? "Purge this URL once the cookie is gone." : hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
   }
 
   const order: Record<Severity, number> = { blocks: 0, hurts: 1, info: 2 };
   f.sort((x, y) => order[x.severity] - order[y.severity]);
-  const verdict = leaked.length
+  const verdict = leaked
     ? "cached-unsafe"
     : hit
     ? "cached-at-cdn"

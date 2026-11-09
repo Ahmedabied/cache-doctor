@@ -26,7 +26,7 @@ const count = (f: (r: Report) => boolean) => results.filter(f).length;
 const share = (n: number) => `${n} (${Math.round((100 * n) / results.length)}%)`;
 console.log(`${results.length} sites checked, ${failed.length} unreachable`);
 console.log(`time to diagnose (two fetches): median ${pct(0.5)} ms, p90 ${pct(0.9)} ms`);
-for (const v of ["cached-at-cdn", "cacheable", "cacheable-with-issues", "not-cacheable", "refused"]) {
+for (const v of ["cached-unsafe", "cached-at-cdn", "cacheable", "cacheable-with-issues", "not-cacheable", "refused"]) {
   console.log(`verdict ${v}: ${share(count((r) => r.verdict === v))}`);
 }
 const ids = new Map<string, number>();

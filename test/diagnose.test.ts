@@ -189,20 +189,35 @@ test("inside a Worker, headers Cloudflare adds to every fetch are ignored", () =
 
 test("a hit that hands every visitor the same cookie is a blocker, not a pass", () => {
   const h = { "cache-control": "public, s-maxage=600", "x-cache": "Hit from cloudfront", "x-amz-cf-id": "a" };
-  const same = ["sessionid=SAME123; Path=/; HttpOnly", "__cf_bm=edge1; Path=/"];
+  const same = ["sessionid=9f2c4e1a7b3d5f60a8c2e4b6; Path=/; HttpOnly", "lang=en", "__cf_bm=edge1; Path=/"];
   const d = diagnose("u", snap(h, { setCookies: same }), snap(h, { setCookies: same }));
   assert.equal(d.verdict, "cached-unsafe");
   const leak = d.findings.find((f) => f.id === "cached-cookie")!;
   assert.equal(leak.severity, "blocks");
   assert.match(leak.title, /sessionid/);
-  assert.doesNotMatch(leak.title, /__cf_bm/); // edge cookies are added after the cache
+  assert.doesNotMatch(leak.title, /lang|__cf_bm/); // a short constant is not an identity; edge cookies come after the cache
   // A different value on the second request means the cookie is set per request, not stored.
   const fresh = diagnose("u", snap(h, { setCookies: ["sessionid=A1"] }), snap(h, { setCookies: ["sessionid=B2"] }));
   assert.equal(fresh.verdict, "cached-at-cdn");
-  assert.ok(!ids(fresh).includes("cached-cookie"));
+  assert.ok(!ids(fresh).some((x) => x.startsWith("cached-cookie")));
   // The same edge cookie on both is not a leak either.
   const edge = diagnose("u", snap(h, { setCookies: ["__cf_bm=x"] }), snap(h, { setCookies: ["__cf_bm=x"] }));
   assert.equal(edge.verdict, "cached-at-cdn");
+});
+
+test("cookies added per request after the cache are not blamed on it", () => {
+  // Seen on two real sites in the survey: a fresh visitor id on each hit, next to constant flags.
+  const h = { "cache-control": "public, s-maxage=600", "x-vercel-cache": "HIT", "x-vercel-id": "x" };
+  const first = ["visitor_id=3b9d1f20-8a4c-4e57-9b61-2c7f0d5e8a13", "prompt=none", "renewed=1"];
+  const second = ["visitor_id=c41e7a92-6d0b-4f3e-8a25-91b6e0f4d7c8", "prompt=none", "renewed=1"];
+  const d = diagnose("u", snap(h, { setCookies: first }), snap(h, { setCookies: second }));
+  assert.equal(d.verdict, "cached-at-cdn");
+  assert.ok(!ids(d).some((x) => x.startsWith("cached-cookie")));
+  // Only short constants, repeated exactly: nobody leaks, but the cached page resets the visitor's own value.
+  const flags = ["prompt=none", "renewed=1"];
+  const c = diagnose("u", snap(h, { setCookies: flags }), snap(h, { setCookies: flags }));
+  assert.equal(c.verdict, "cached-at-cdn");
+  assert.equal(c.findings.find((f) => f.id === "cached-cookie-constant")!.severity, "hurts");
 });
 
 test("hit-for-pass is a miss, in X-Cache and in Cache-Status", () => {

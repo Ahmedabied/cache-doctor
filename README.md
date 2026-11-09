@@ -52,25 +52,31 @@ It asks for the page twice, back to back, with no cookies, and compares the two 
 | Vary | `*`, `Cookie`, `Authorization`, `User-Agent`, `Accept-Language` |
 | The URL | tracking parameters (`utm_*`, `gclid`, `fbclid` and others) that split the cache key, and cache busters |
 | The body | what differs between the two anonymous responses: per-visitor CSRF tokens, CSP nonces, timestamps and request ids, shown with their context and the values masked |
-| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If that hit carries the very same `Set-Cookie` as the first response, the cache is handing one visitor's cookie to everyone: that is a blocker |
+| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker |
 
-30 finding types in all, each with a test.
+31 finding types in all, each with a test.
 
 ## Measured
 
 `node bench/survey.ts` checked the homepages of 50 well-known sites (public services, news, developer tools,
-shops), two anonymous requests each, on 2026-11-09:
+shops), two anonymous requests each, on 2026-11-09 (rerun with the current rules):
 
 | | |
 |---|---|
-| sites that answered | 49 |
-| time to diagnose, median | 706 ms (both fetches and the analysis) |
-| time to diagnose, p90 | 1.7 s |
-| already served from their CDN's cache | 21 (43%) |
-| cannot be shared from a cache as served | 11 (22%) |
-| refused an unknown client | 9 (18%) |
+| sites that answered | 48 |
+| time to diagnose, median | 579 ms (both fetches and the analysis) |
+| time to diagnose, p90 | 1.6 s |
+| already served from their CDN's cache | 19 (40%) |
+| cannot be shared from a cache as served | 11 (23%) |
+| refused an unknown client | 9 (19%) |
 | set a cookie on an anonymous first visit | 13 (27%) |
 | send a fresh CSP nonce on every response | 5 (10%) |
+| hand one visitor's cookie to everyone from the cache | 0 |
+
+The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
+visitor id on every hit, next to constant flags like `none` and `1` that were the same both times. A stored
+response repeats every cookie exactly, so the rule now asks for that, and for a value long enough to identify
+someone.
 
 The analysis itself takes about 7 ms for a 480 KB page; the rest is the network. The full list is in
 [bench/sites.txt](bench/sites.txt).
@@ -111,7 +117,7 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
 
 ```sh
 npm ci
-npm test            # 36 tests: every finding, the probe and CLI against a local server
+npm test            # 37 tests: every finding, the probe and CLI against a local server
 npm run typecheck   # the library and the Worker
 npm run compile     # rebuild dist/src (committed, so `npx github:` needs no dev tools; CI checks it is current)
 npx wrangler dev    # the page on localhost:8787
