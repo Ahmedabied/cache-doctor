@@ -73,8 +73,8 @@ shops), two anonymous requests each, on 2026-11-09 (rerun with the current rules
 | send a fresh CSP nonce on every response | 5 (10%) |
 | hand one visitor's cookie to everyone from the cache | 0 |
 
-Two of the 22 say HIT only in nginx-style headers (`X-Proxy-Cache`, `X-Cache-Status`), which an earlier version
-did not read; six sites send them. The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
+Six sites report their cache only in nginx-style headers (`X-Proxy-Cache`, `X-Cache-Status`), which an earlier
+version did not read; the run just before reading them counted 20 served from cache. The last row was 2 in an earlier version, and both were false alarms worth knowing about: each site added a fresh
 visitor id on every hit, next to constant flags like `none` and `1` that were the same both times. A stored
 response repeats every cookie exactly, so the rule now asks for that, and for a value long enough to identify
 someone.
