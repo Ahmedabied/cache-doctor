@@ -24,7 +24,7 @@ export interface Snapshot {
 
 export interface Diagnosis {
   url: string;
-  verdict: "refused" | "cached-at-cdn" | "cacheable" | "cacheable-with-issues" | "not-cacheable";
+  verdict: "refused" | "cached-unsafe" | "cached-at-cdn" | "cacheable" | "cacheable-with-issues" | "not-cacheable";
   ttl: number | null;
   cdn: { name: string; status: string[] } | null;
   findings: Finding[];
@@ -37,7 +37,6 @@ const BUSTERS = /^(_|cb|cachebust(er)?|nocache|no_cache|t|ts|timestamp|rand|rand
 // Cookies that CDNs and bot shields add at the edge, after the cache lookup. They are not part
 // of the cached page, so they do not stop the CDN from caching it.
 const EDGE_COOKIES = /^(__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|__cfwaitingroom|ak_bmsc|bm_sv|bm_sz|bm_mi|_abck|incap_ses_\d+_\d+|visid_incap_\d+|nlbi_\d+)$/i;
-const SERVED_FROM_CACHE = /^(HIT|STALE|UPDATING|REVALIDATED)\b|\bhit\b/i;
 const STATIC_TYPES = /^(text\/css|(text|application)\/javascript|image\/|font\/|audio\/|video\/|application\/(wasm|pdf|zip|octet-stream))/;
 
 // Everything a server sends is untrusted. Control characters and bidi overrides would let a
@@ -58,6 +57,74 @@ export function parseCacheControl(value: string | undefined): Map<string, string
     if (!out.has(key)) out.set(key, rest.length ? v : true);
   }
   return out;
+}
+
+// Cache-Status (RFC 9211) is a structured list: one member per cache, each with parameters, for
+// example `ExampleCache; hit, OriginCache; fwd=uri-miss; stored`. Parameter values may be tokens,
+// numbers, ?1 / ?0 or quoted strings (which may contain commas and semicolons).
+export function parseCacheStatus(value: string): Array<{ cache: string; params: Map<string, string | boolean> }> {
+  const out: Array<{ cache: string; params: Map<string, string | boolean> }> = [];
+  for (const member of value.match(/(?:[^,"]|"(?:[^"\\]|\\.)*")+/g) ?? []) {
+    const [name = "", ...rest] = member.match(/(?:[^;"]|"(?:[^"\\]|\\.)*")+/g) ?? [];
+    const params = new Map<string, string | boolean>();
+    for (const p of rest) {
+      const eq = p.indexOf("=");
+      const key = (eq < 0 ? p : p.slice(0, eq)).trim().toLowerCase();
+      if (!key || params.has(key)) continue;
+      const raw = eq < 0 ? "?1" : p.slice(eq + 1).trim();
+      params.set(key, raw === "?1" ? true : raw === "?0" ? false : raw.replace(/^"(.*)"$/s, "$1"));
+    }
+    out.push({ cache: name.trim().replace(/^"(.*)"$/s, "$1"), params });
+  }
+  return out;
+}
+
+// The older one-word status headers (X-Cache, CF-Cache-Status and friends) can list several caches,
+// "MISS, HIT". "HIT-FOR-PASS" (Varnish, Fastly) is a remembered decision NOT to cache: a miss.
+function wordHit(value: string): boolean {
+  return value.split(",").some((part) => {
+    const t = part.trim().toLowerCase();
+    if (/^(tcp_)?(hit[-_ ]?for[-_ ]?pass|hitpass)/.test(t)) return false;
+    return /^(hit|stale|updating|revalidated|refreshhit|tcp_(mem_|refresh_|ims_)?hit)\b/.test(t);
+  });
+}
+
+const STATUS_HEADERS = ["cf-cache-status", "x-vercel-cache", "cache-status", "akamai-cache-status", "x-cache"];
+
+export function servedFromCache(h: Record<string, string>): boolean {
+  const name = STATUS_HEADERS.find((n) => h[n]);
+  if (!name) return false;
+  if (name === "cache-status") return parseCacheStatus(h[name]!).some((m) => m.params.get("hit") === true);
+  return wordHit(h[name]!);
+}
+
+// An HTTP date in one of the three forms RFC 9110 (5.6.7) says a recipient must accept, or null.
+// Anything else (Expires: 0, Expires: 2030) is not a date, which RFC 9111 (5.3) says means expired.
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MON = MONTHS.join("|");
+const IMF = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{2}) (${MON}) (\\d{4}) (\\d{2}):(\\d{2}):(\\d{2}) GMT$`);
+const RFC850 = new RegExp(`^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{2})-(${MON})-(\\d{2}) (\\d{2}):(\\d{2}):(\\d{2}) GMT$`);
+const ASCTIME = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (${MON}) ([ \\d]\\d) (\\d{2}):(\\d{2}):(\\d{2}) (\\d{4})$`);
+
+export function httpDate(value: string | undefined, now = Date.now()): number | null {
+  if (value === undefined) return null;
+  const v = value.trim();
+  let day: number, mon: string, year: number, hh: number, mm: number, ss: number;
+  let m = IMF.exec(v);
+  if (m) [day, mon, year, hh, mm, ss] = [+m[1]!, m[2]!, +m[3]!, +m[4]!, +m[5]!, +m[6]!];
+  else if ((m = RFC850.exec(v))) {
+    // Two-digit year: more than 50 years ahead means the century before (RFC 9110, 5.6.7).
+    const yy = +m[3]!;
+    const thisYear = new Date(now).getUTCFullYear();
+    year = Math.floor(thisYear / 100) * 100 + yy;
+    if (year > thisYear + 50) year -= 100;
+    [day, mon, hh, mm, ss] = [+m[1]!, m[2]!, +m[4]!, +m[5]!, +m[6]!];
+  } else if ((m = ASCTIME.exec(v))) [mon, day, hh, mm, ss, year] = [m[1]!, +m[2]!.trim(), +m[3]!, +m[4]!, +m[5]!, +m[6]!];
+  else return null;
+  const month = MONTHS.indexOf(mon);
+  if (hh > 23 || mm > 59 || ss > 60) return null;
+  const t = Date.UTC(year, month, day, hh, mm, Math.min(ss, 59));
+  return new Date(t).getUTCDate() === day ? t : null; // no 31 February
 }
 
 function seconds(v: string | true | undefined): number | null {
@@ -102,14 +169,8 @@ export function detectCdn(h: Record<string, string>): string | null {
 }
 
 export function cacheStatus(h: Record<string, string>): string {
-  return (
-    h["cf-cache-status"] ??
-    h["x-vercel-cache"] ??
-    h["cache-status"] ??
-    h["akamai-cache-status"] ??
-    h["x-cache"] ??
-    (h["age"] ? `age ${h["age"]}` : "")
-  ).trim();
+  const name = STATUS_HEADERS.find((n) => h[n]);
+  return (name ? h[name]! : h["age"] ? `age ${h["age"]}` : "").trim();
 }
 
 const CF_STATUS: Record<string, string> = {
@@ -194,6 +255,14 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   if (b) b = { ...b, headers: ownCfHeaders(b.headers, opts) };
   const h = a.headers;
 
+  // Cloudflare's own errors (520 to 530): it could not reach the site, or would not (a name that
+  // points at a private address gets 530). The body is Cloudflare's error page, not the site's.
+  if (a.status >= 520 && a.status <= 530) {
+    add("refused", "info", `No answer from the site: status ${a.status} is a Cloudflare error`,
+      "Cloudflare could not get the page from the site (it is down, or the name points somewhere Cloudflare will not go). This is Cloudflare's error page, so nothing here says how the real page is cached.",
+      "Check that the site is up, then try again, or run the command line tool from your own machine.");
+    return { url, verdict: "refused", ttl: null, cdn: null, findings: f };
+  }
   // The site would not show us the page: diagnosing the refusal would mislead.
   if (REFUSED.has(a.status) || (a.status === 503 && /challenge/i.test(h["cf-mitigated"] ?? ""))) {
     add("refused", "info", `The site refused the check with status ${a.status}`,
@@ -214,15 +283,19 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
 
   const sMax = seconds(shared.get("s-maxage"));
   const maxAge = seconds(shared.get("max-age"));
-  const date = Date.parse(h["date"] ?? "") || Date.now();
+  // A lifetime that is not a whole number of seconds (max-age=abc, a bare max-age) counts as stale
+  // (RFC 9111, 4.2.1), so the response goes back to the origin every time.
+  const broken = (["s-maxage", "max-age"] as const).filter((k) => shared.has(k) && seconds(shared.get(k)) === null);
+  const date = httpDate(h["date"]) ?? Date.now();
   const expiresRaw = h["expires"];
-  const expires = expiresRaw !== undefined ? Date.parse(expiresRaw) : NaN;
-  let ttl: number | null = sMax ?? maxAge ?? null;
-  if (ttl === null && expiresRaw !== undefined) ttl = Number.isNaN(expires) ? 0 : Math.max(0, Math.round((expires - date) / 1000));
+  const expires = httpDate(expiresRaw);
+  let ttl: number | null = broken.length ? 0 : (sMax ?? maxAge ?? null);
+  if (ttl === null && expiresRaw !== undefined) ttl = expires === null ? 0 : Math.max(0, Math.round((expires - date) / 1000));
   const explicit = ttl !== null;
+  const isPublic = shared.has("public");
 
-  // 1. Status code.
-  if (!CACHEABLE_BY_DEFAULT.has(a.status) && !explicit) {
+  // 1. Status code. `public` also lets a cache store other statuses and guess a lifetime (RFC 9111, 3 and 4.2.2).
+  if (!CACHEABLE_BY_DEFAULT.has(a.status) && !explicit && !isPublic) {
     add("status", "blocks", `Status ${a.status} is not cached unless it says for how long`,
       `Caches store ${[...CACHEABLE_BY_DEFAULT].join(", ")} by default. Other statuses need an explicit lifetime.`,
       a.status >= 300 && a.status < 400
@@ -239,6 +312,15 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
       "No cache, shared or private, may keep a copy of this response.",
       "Keep no-store for pages with personal data. For public pages, remove it and send Cache-Control: public, max-age=0, s-maxage=300 (fresh at the CDN for 5 minutes, always checked by browsers).");
   }
+  if (broken.length) {
+    const k = broken[0]!;
+    const v = shared.get(k);
+    add("broken-lifetime", "hurts", `Cache-Control ${k}${v === true ? " has no value" : `=${v} is not a number of seconds`}`,
+      "Caches are told to treat a response with a broken lifetime as already stale (RFC 9111, 4.2.1), so every request goes back to the origin.",
+      `Use whole seconds, for example ${k}=300.`);
+  }
+  const fields = (v: string | true | undefined) =>
+    typeof v === "string" ? v.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean) : [];
   const priv = shared.get("private");
   if (priv === true) {
     add("private", "blocks", "Cache-Control: private",
@@ -246,9 +328,16 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
       "If every anonymous visitor gets the same page, replace private with public, s-maxage=<seconds>. If it is personal, it is right as it is.");
   } else if (typeof priv === "string") {
     add("private-fields", "info", `Cache-Control: private="${priv}"`,
-      `A shared cache may store the response but must drop these headers: ${priv}.`, "Nothing to fix if that is intended.");
+      `A shared cache may store the response but must drop these headers: ${priv}. The RFC notes that many caches treat this like plain private and do not store the response at all.`,
+      "Nothing to fix if that is intended. Check that your CDN supports the field list.");
   }
   const noCache = shared.get("no-cache");
+  if (typeof noCache === "string") {
+    add("no-cache-fields", "info", `Cache-Control: no-cache="${noCache}"`,
+      `A cache may reuse the response without asking the origin, as long as it leaves out these headers: ${noCache}. The RFC notes that many caches treat this like plain no-cache and check with the origin every time.`,
+      "Nothing to fix if that is intended. Check that your CDN supports the field list.");
+  }
+  const cookieDropped = [...fields(priv), ...fields(noCache)].includes("set-cookie");
   const validators = Boolean(h["etag"] || h["last-modified"]);
   if (noCache === true || (sMax === null && maxAge === 0) || sMax === 0) {
     const what = noCache === true ? "Cache-Control: no-cache" : "a lifetime of 0 seconds";
@@ -260,9 +349,9 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   }
 
   // 3. Expires and Pragma.
-  if (expiresRaw !== undefined && sMax === null && maxAge === null && (Number.isNaN(expires) || expires <= date)) {
+  if (expiresRaw !== undefined && sMax === null && maxAge === null && !broken.length && (expires === null || expires <= date)) {
     add("expires-past", "hurts", `Expires is in the past or invalid ("${expiresRaw}")`,
-      "With no max-age, an Expires date that has passed (or is not a date, like 0) makes the response stale at once.",
+      "With no max-age, an Expires date that has passed, or is not an HTTP date (like 0 or 2030), makes the response stale at once (RFC 9111, 5.3).",
       "Send Cache-Control with s-maxage instead; it overrides Expires.");
   }
   if (h["pragma"]?.toLowerCase().includes("no-cache") && !h["cache-control"]) {
@@ -275,8 +364,13 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   const allNames = [...new Set(a.setCookies.map(cookieName))];
   const names = allNames.filter((n) => !EDGE_COOKIES.test(n));
   const edge = allNames.filter((n) => EDGE_COOKIES.test(n));
-  if (names.length) {
-    add("set-cookie", "blocks", `Sets ${names.length === 1 ? "a cookie" : `${names.length} cookies`} on an anonymous visit: ${names.join(", ")}`,
+  const cookieTitle = `Sets ${names.length === 1 ? "a cookie" : `${names.length} cookies`} on an anonymous visit: ${names.join(", ")}`;
+  if (names.length && cookieDropped) {
+    add("set-cookie-dropped", "hurts", cookieTitle,
+      "Cache-Control names Set-Cookie, which is the standard way to say a shared cache may store the page without the cookie (RFC 9111, 5.2.2.4 and 5.2.2.7). The RFC also notes that many caches do not support the field list and treat it as plain private or no-cache, so the page may not be cached at all.",
+      "Check that your CDN supports the field list. Better: do not set the cookie on an anonymous first visit.");
+  } else if (names.length) {
+    add("set-cookie", "blocks", cookieTitle,
       "Shared caches do not store a response that sets a cookie (Cloudflare does not, by default): the same cookie would be handed to every visitor. A first visit with no cookies should not need one.",
       "Set session cookies only after login or on POST. Move consent or analytics cookies to JavaScript, or set them from a separate uncached request.");
   }
@@ -310,7 +404,7 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   // 6. No lifetime at all.
   const type = (h["content-type"] ?? "").toLowerCase();
   if (!explicit && !shared.has("no-store") && priv !== true && noCache !== true && a.status < 400 &&
-      CACHEABLE_BY_DEFAULT.has(a.status)) {
+      (CACHEABLE_BY_DEFAULT.has(a.status) || isPublic)) {
     if (STATIC_TYPES.test(type)) {
       add("no-lifetime-static", "info", "No lifetime given for a static file",
         "CDNs cache common static file types by default, with their own default lifetime. Browsers guess from Last-Modified.",
@@ -381,18 +475,31 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   const cdnName = detectCdn(h);
   const statuses = [cacheStatus(h), b ? cacheStatus(b.headers) : ""].filter(Boolean);
   const last = (statuses[statuses.length - 1] ?? "").trim();
-  const hit = Boolean(b) && SERVED_FROM_CACHE.test(last);
+  const hit = Boolean(b) && servedFromCache(b!.headers);
+
+  // A cached Set-Cookie: both anonymous visitors were handed the very same cookie by the cache.
+  // Whoever filled the cache now gives their cookie (a session id, a language choice) to everyone.
+  const pairs = (s: Snapshot) =>
+    new Set(s.setCookies.map((c) => (c.split(";")[0] ?? "").trim()).filter((p) => p && !EDGE_COOKIES.test(cookieName(p))));
+  const leaked = hit && b ? [...pairs(a)].filter((p) => pairs(b!).has(p)).map(cookieName) : [];
+  if (leaked.length) {
+    add("cached-cookie", "blocks", `The cache hands the same cookie to every visitor: ${[...new Set(leaked)].join(", ")}`,
+      "The second request was a cache hit and came with exactly the same Set-Cookie as the first. Every visitor who gets this cached copy gets that cookie too, which overwrites their own; if it is a session id, they all share one session.",
+      "Do not set cookies on anonymous visits, or strip Set-Cookie at the edge before the response is stored. Then purge this URL from the cache.");
+  }
   if (cdnName) {
     const meaning = cdnName === "Cloudflare" ? CF_STATUS[last.toUpperCase()] : undefined;
     add("cdn", "info", `${cdnName} is in front${statuses.length ? `: ${statuses.join(", then ")}` : ""}`,
       (meaning ?? (hit ? "The second request was served from the cache." : "Cache status as reported by the CDN.")) +
-        (hit ? " The other findings are about what browsers and any cache after the CDN see." : ""),
-      hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
+        (hit && !leaked.length ? " The other findings are about what browsers and any cache after the CDN see." : ""),
+      leaked.length ? "Purge this URL once the cookie is gone." : hit ? "Nothing to fix at the CDN for this URL." : "Fix the blockers above; the CDN status should then turn into MISS and then HIT.");
   }
 
   const order: Record<Severity, number> = { blocks: 0, hurts: 1, info: 2 };
   f.sort((x, y) => order[x.severity] - order[y.severity]);
-  const verdict = hit
+  const verdict = leaked.length
+    ? "cached-unsafe"
+    : hit
     ? "cached-at-cdn"
     : f.some((x) => x.severity === "blocks")
       ? "not-cacheable"

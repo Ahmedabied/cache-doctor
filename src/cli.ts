@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // cache-doctor <url> [--json] [--timeout ms]
-// Exit code: 0 cached or cacheable (maybe with issues), 1 not cacheable, 2 error or refused by the site.
+// Exit code: 0 cached or cacheable (maybe with issues), 1 not cacheable or cached unsafely, 2 error or refused.
 
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ const paint = (code: string, s: string) => (color ? `\x1b[${code}m${s}\x1b[0m` :
 const LABEL = { blocks: paint("1;31", "BLOCKS"), hurts: paint("1;33", "HURTS "), info: paint("2", "info  ") };
 const VERDICT = {
   refused: paint("1;33", "the site refused the check"),
+  "cached-unsafe": paint("1;31", "cached at the CDN, with the same cookie for every visitor"),
   "cached-at-cdn": paint("1;32", "cached at the CDN (seen as a hit)"),
   "not-cacheable": paint("1;31", "not cacheable at a shared cache"),
   "cacheable-with-issues": paint("1;33", "cacheable, but with problems"),
@@ -80,7 +81,7 @@ async function main(argv: string[]): Promise<number> {
   try {
     const r = await check(target.toString(), { timeoutMs });
     console.log(json ? JSON.stringify(r, null, 2) : render(r));
-    return r.verdict === "not-cacheable" ? 1 : r.verdict === "refused" ? 2 : 0;
+    return r.verdict === "not-cacheable" || r.verdict === "cached-unsafe" ? 1 : r.verdict === "refused" ? 2 : 0;
   } catch (e) {
     console.error(`cache-doctor: ${target}: ${(e as Error).message}`);
     return 2;

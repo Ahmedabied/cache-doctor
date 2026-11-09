@@ -70,7 +70,7 @@ button[disabled] { opacity: .5; cursor: progress; }
 .verdict { border-radius: 12px; padding: 20px 22px; margin: 0 0 18px; background: var(--card); border: 1px solid var(--line); }
 .verdict h2 { margin: 0 0 6px; font-size: 22px; letter-spacing: -.01em; }
 .meta { color: var(--muted); font: 13px/1.6 ${MONO}; margin: 0; overflow-wrap: anywhere; }
-.v-not-cacheable h2 { color: var(--block); }
+.v-not-cacheable h2, .v-cached-unsafe h2 { color: var(--block); }
 .v-refused h2 { color: var(--muted); }
 .v-cacheable-with-issues h2 { color: var(--hurt); }
 .v-cacheable h2, .v-cached-at-cdn h2 { color: var(--ok); }
@@ -104,7 +104,8 @@ const VERDICT = {
   "cacheable-with-issues": "Cacheable, but with problems",
   "cacheable": "Cacheable",
   "cached-at-cdn": "Cached at the CDN",
-  "refused": "The site refused the check",
+  "cached-unsafe": "Cached at the CDN, with the same cookie for every visitor",
+  "refused": "No diagnosis: the site refused or could not be reached",
 };
 
 function el(tag, cls, text) {

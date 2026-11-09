@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bodyDiffs, clean, diagnose, parseCacheControl, type Snapshot } from "../src/diagnose.ts";
+import { bodyDiffs, clean, diagnose, httpDate, parseCacheControl, parseCacheStatus, servedFromCache, type Snapshot } from "../src/diagnose.ts";
 
 function snap(headers: Record<string, string> = {}, opts: Partial<Snapshot> = {}): Snapshot {
   return {
@@ -185,4 +185,104 @@ test("inside a Worker, headers Cloudflare adds to every fetch are ignored", () =
   const f = diagnose("u", snap(fastly), snap(fastly), { insideCloudflare: true });
   assert.equal(f.cdn?.name, "Fastly");
   assert.deepEqual(f.cdn?.status, ["HIT", "HIT"]);
+});
+
+test("a hit that hands every visitor the same cookie is a blocker, not a pass", () => {
+  const h = { "cache-control": "public, s-maxage=600", "x-cache": "Hit from cloudfront", "x-amz-cf-id": "a" };
+  const same = ["sessionid=SAME123; Path=/; HttpOnly", "__cf_bm=edge1; Path=/"];
+  const d = diagnose("u", snap(h, { setCookies: same }), snap(h, { setCookies: same }));
+  assert.equal(d.verdict, "cached-unsafe");
+  const leak = d.findings.find((f) => f.id === "cached-cookie")!;
+  assert.equal(leak.severity, "blocks");
+  assert.match(leak.title, /sessionid/);
+  assert.doesNotMatch(leak.title, /__cf_bm/); // edge cookies are added after the cache
+  // A different value on the second request means the cookie is set per request, not stored.
+  const fresh = diagnose("u", snap(h, { setCookies: ["sessionid=A1"] }), snap(h, { setCookies: ["sessionid=B2"] }));
+  assert.equal(fresh.verdict, "cached-at-cdn");
+  assert.ok(!ids(fresh).includes("cached-cookie"));
+  // The same edge cookie on both is not a leak either.
+  const edge = diagnose("u", snap(h, { setCookies: ["__cf_bm=x"] }), snap(h, { setCookies: ["__cf_bm=x"] }));
+  assert.equal(edge.verdict, "cached-at-cdn");
+});
+
+test("hit-for-pass is a miss, in X-Cache and in Cache-Status", () => {
+  assert.equal(servedFromCache({ "x-cache": "HIT-FOR-PASS" }), false);
+  assert.equal(servedFromCache({ "x-cache": "hitpass" }), false);
+  assert.equal(servedFromCache({ "x-cache": "MISS, HIT" }), true);
+  assert.equal(servedFromCache({ "x-cache": "Hit from cloudfront" }), true);
+  assert.equal(servedFromCache({ "x-cache": "RefreshHit from cloudfront" }), true);
+  assert.equal(servedFromCache({ "x-cache": "TCP_MEM_HIT" }), true);
+  assert.equal(servedFromCache({ "cf-cache-status": "EXPIRED" }), false);
+  assert.equal(servedFromCache({ "cache-status": 'ExampleCache; fwd=uri-miss; detail="hit-for-pass"' }), false);
+  assert.equal(servedFromCache({ "cache-status": "ExampleCache; hit" }), true);
+  assert.equal(servedFromCache({ "cache-status": "ExampleCache; hit=?0" }), false);
+  assert.equal(servedFromCache({ "cache-status": "OriginCache; hit; ttl=30, CDN; fwd=uri-miss; stored" }), true);
+  const h = { "cache-control": "private", "x-cache": "HIT-FOR-PASS", age: "0" };
+  assert.equal(diagnose("u", snap(h), snap(h)).verdict, "not-cacheable");
+});
+
+test("parseCacheStatus reads the RFC 9211 list, quoted strings included", () => {
+  const list = parseCacheStatus('"Cache, Inc; EU"; hit; ttl=12, Edge; fwd=vary-miss; key="a,b;c"; collapsed=?1');
+  assert.equal(list.length, 2);
+  assert.equal(list[0]!.cache, "Cache, Inc; EU");
+  assert.equal(list[0]!.params.get("hit"), true);
+  assert.equal(list[0]!.params.get("ttl"), "12");
+  assert.equal(list[1]!.params.get("fwd"), "vary-miss");
+  assert.equal(list[1]!.params.get("key"), "a,b;c");
+  assert.equal(list[1]!.params.get("collapsed"), true);
+});
+
+test("private and no-cache naming Set-Cookie are the standard fix, not a blocker", () => {
+  for (const cc of ['public, s-maxage=600, private="Set-Cookie"', 'public, s-maxage=600, no-cache="Set-Cookie"']) {
+    const d = run({ "cache-control": cc }, { setCookies: ["consent=1; Path=/"] });
+    assert.equal(d.verdict, "cacheable-with-issues", cc);
+    assert.ok(ids(d).includes("set-cookie-dropped") && !ids(d).includes("set-cookie"), cc);
+    assert.equal(d.findings.find((f) => f.id === "set-cookie-dropped")!.severity, "hurts");
+    assert.ok(ids(d).includes(cc.includes("private") ? "private-fields" : "no-cache-fields"), cc);
+  }
+  // Naming some other header leaves the cookie blocker in place.
+  const other = run({ "cache-control": 'public, s-maxage=600, private="X-User"' }, { setCookies: ["sid=1"] });
+  assert.ok(ids(other).includes("set-cookie"));
+});
+
+test("httpDate accepts the three HTTP date forms and nothing else", () => {
+  const t = Date.UTC(1994, 10, 6, 8, 49, 37);
+  assert.equal(httpDate("Sun, 06 Nov 1994 08:49:37 GMT"), t);
+  assert.equal(httpDate("Sunday, 06-Nov-94 08:49:37 GMT", Date.UTC(2026, 0, 1)), t);
+  assert.equal(httpDate("Sun Nov  6 08:49:37 1994"), t);
+  // Two-digit year more than 50 years ahead is the century before.
+  assert.equal(new Date(httpDate("Monday, 01-Jan-80 00:00:00 GMT", Date.UTC(2026, 0, 1))!).getUTCFullYear(), 1980);
+  assert.equal(new Date(httpDate("Monday, 01-Jan-30 00:00:00 GMT", Date.UTC(2026, 0, 1))!).getUTCFullYear(), 2030);
+  for (const bad of ["2030", "0", "-1", "Sun, 31 Feb 2030 00:00:00 GMT", "sun, 06 nov 1994 08:49:37 gmt", "Sun, 06 Nov 1994 25:00:00 GMT", ""]) {
+    assert.equal(httpDate(bad), null, bad);
+  }
+});
+
+test("an Expires that is not an HTTP date means already expired", () => {
+  const d = run({ expires: "2030", date: "Mon, 09 Nov 2026 07:00:00 GMT" });
+  assert.equal(d.ttl, 0);
+  assert.ok(ids(d).includes("expires-past"));
+});
+
+test("a broken max-age counts as stale", () => {
+  for (const cc of ["public, max-age=abc", "public, s-maxage"]) {
+    const d = run({ "cache-control": cc });
+    assert.equal(d.ttl, 0, cc);
+    assert.deepEqual(ids(d), ["broken-lifetime"], cc);
+  }
+});
+
+test("public lets a cache store a redirect and guess its lifetime", () => {
+  const d = diagnose("u", snap({ "cache-control": "public" }, { status: 302 }));
+  assert.ok(!ids(d).includes("status"));
+  assert.ok(ids(d).includes("no-lifetime"));
+  assert.ok(ids(diagnose("u", snap({}, { status: 302 }))).includes("status"));
+});
+
+test("Cloudflare errors (520 to 530) are not diagnosed as the site", () => {
+  for (const status of [520, 522, 530]) {
+    const d = diagnose("u", snap({ "cache-control": "no-store" }, { status }));
+    assert.equal(d.verdict, "refused");
+    assert.deepEqual(ids(d), ["refused"]);
+  }
 });

@@ -32,8 +32,9 @@ https://github.com/
   HURTS   Vary: Accept-Language
 ```
 
-`--json` prints the full report. The exit code is 0 when the page is cached or cacheable, 1 when it is not, and 2
-when the check failed or the site refused it, so it can run in CI against your own pages.
+`--json` prints the full report. The exit code is 0 when the page is cached or cacheable, 1 when it is not (or when
+the cache hands every visitor the same cookie), and 2 when the check failed or the site refused it, so it can run in
+CI against your own pages.
 
 ## What it checks
 
@@ -42,15 +43,15 @@ It asks for the page twice, back to back, with no cookies, and compares the two 
 | Area | What it looks for |
 |---|---|
 | Cache-Control | `no-store`, `private`, `no-cache`, `max-age=0` without `s-maxage`, short lifetimes, and the targeted `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` headers that override it for CDNs |
-| Status | statuses a cache only stores when told how long (302, 307, 500, 503 and others); a 401, 403 or 429 is reported as the site refusing the check, not diagnosed as the page |
-| Lifetimes | no lifetime at all (HTML versus static files), `Expires` in the past or invalid, legacy `Pragma` |
-| Cookies | `Set-Cookie` on an anonymous visit, by name; cookies a CDN adds at the edge (`__cf_bm`, Akamai and Imperva bot cookies) are recognised and not blamed on the origin |
+| Status | statuses a cache only stores when told how long or marked `public` (302, 307, 500, 503 and others); a 401, 403 or 429 is reported as the site refusing the check, and a Cloudflare 520 to 530 as Cloudflare not reaching the site, neither diagnosed as the page |
+| Lifetimes | no lifetime at all (HTML versus static files), a `max-age` that is not a number (stale, RFC 9111 4.2.1), `Expires` in the past or not a real HTTP date (expired, RFC 9111 5.3), legacy `Pragma` |
+| Cookies | `Set-Cookie` on an anonymous visit, by name; `private="Set-Cookie"` and `no-cache="Set-Cookie"`, the standard way to cache the page without the cookie (with the RFC's warning that many caches do not support it); cookies a CDN adds at the edge (`__cf_bm`, Akamai and Imperva bot cookies) are recognised and not blamed on the origin |
 | Vary | `*`, `Cookie`, `Authorization`, `User-Agent`, `Accept-Language` |
 | The URL | tracking parameters (`utm_*`, `gclid`, `fbclid` and others) that split the cache key, and cache busters |
 | The body | what differs between the two anonymous responses: per-visitor CSRF tokens, CSP nonces, timestamps and request ids, shown with their context and the values masked |
-| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header. A HIT on the second request is proof the CDN caches the page, so it decides the verdict |
+| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If that hit carries the very same `Set-Cookie` as the first response, the cache is handing one visitor's cookie to everyone: that is a blocker |
 
-27 finding types in all, each with a test.
+30 finding types in all, each with a test.
 
 ## Measured
 
@@ -78,7 +79,10 @@ command line tool. It is built so it cannot be turned into a proxy or pointed in
 
 - Only the diagnosis comes back, never the fetched page. Bodies are read up to 200 KB and then dropped.
 - It refuses IP addresses, ports other than 80 and 443, credentials in the URL, and internal names (`localhost`,
-  `.internal`, `.local` and similar). Every redirect is checked against the same rules.
+  `.internal`, `.local` and similar). Every redirect is checked against the same rules. These are name checks
+  only: a public name that resolves to a private address (`localtest.me`, `127.0.0.1.nip.io`) passes them. What
+  stops those is Cloudflare's network, which will not fetch private addresses from a Worker and answers 530; the
+  page reports that as "could not be reached", not as the site's caching.
 - 10 checks a minute per address (Workers rate limiting), and the same URL within a minute is answered from the
   edge cache without fetching again.
 - Strict Content-Security-Policy, no outside scripts, and results are rendered as text, never as HTML.
@@ -104,7 +108,7 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
 
 ```sh
 npm ci
-npm test            # 27 tests: every finding, the probe and CLI against a local server
+npm test            # 36 tests: every finding, the probe and CLI against a local server
 npm run typecheck   # the library and the Worker
 npx wrangler dev    # the page on localhost:8787
 ```
