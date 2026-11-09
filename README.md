@@ -110,6 +110,7 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
 npm ci
 npm test            # 36 tests: every finding, the probe and CLI against a local server
 npm run typecheck   # the library and the Worker
+npm run compile     # rebuild dist/src (committed, so `npx github:` needs no dev tools; CI checks it is current)
 npx wrangler dev    # the page on localhost:8787
 ```
 
