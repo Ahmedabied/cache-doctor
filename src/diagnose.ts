@@ -36,7 +36,12 @@ const TRACKING = /^(utm_[a-z_]+|gclid|gbraid|wbraid|dclid|fbclid|msclkid|yclid|i
 const BUSTERS = /^(_|cb|cachebust(er)?|nocache|no_cache|t|ts|timestamp|rand|random|v)$/i;
 // Cookies that CDNs and bot shields add at the edge, after the cache lookup. They are not part
 // of the cached page, so they do not stop the CDN from caching it.
-const EDGE_COOKIES = /^(__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|__cfwaitingroom|ak_bmsc|bm_sv|bm_sz|bm_mi|_abck|incap_ses_\d+_\d+|visid_incap_\d+|nlbi_\d+)$/i;
+const EDGE_COOKIES = /^(__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|__cfwaitingroom|ak_bmsc|bm_sv|bm_sz|bm_mi|_abck|akaalb_\w+|incap_ses_\d+_\d+|visid_incap_\d+|nlbi_\d+|ASLBSA|ASLBSACORS|sucuri_cloudproxy_uuid_[0-9a-f]+)$/i;
+// Stickiness cookies from load balancers in front of the origin (AWS ALB and ELB, F5 BIG-IP, Azure App Service).
+// Unlike edge cookies they do reach a CDN in front of them, so they still stop it caching. But they can be set fresh
+// on every response by a balancer sitting in front of an origin cache (Varnish, nginx), so they say nothing about
+// whether the page's own cookies were stored.
+const LB_COOKIES = /^(AWSALB|AWSALBCORS|AWSALBTG|AWSALBTGCORS|AWSELB|BIGipServer[\w.~-]*|ARRAffinity|ARRAffinitySameSite)$/;
 const STATIC_TYPES = /^(text\/css|(text|application)\/javascript|image\/|font\/|audio\/|video\/|application\/(wasm|pdf|zip|octet-stream))/;
 
 // Everything a server sends is untrusted. Control characters and bidi overrides would let a
@@ -372,7 +377,10 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   } else if (names.length) {
     add("set-cookie", "blocks", cookieTitle,
       "Shared caches do not store a response that sets a cookie (Cloudflare does not, by default): the same cookie would be handed to every visitor. A first visit with no cookies should not need one.",
-      "Set session cookies only after login or on POST. Move consent or analytics cookies to JavaScript, or set them from a separate uncached request.");
+      "Set session cookies only after login or on POST. Move consent or analytics cookies to JavaScript, or set them from a separate uncached request." +
+        (names.some((n) => LB_COOKIES.test(n))
+          ? ` ${names.filter((n) => LB_COOKIES.test(n)).join(", ")} is a load balancer's stickiness cookie: turn stickiness off for pages anyone can see, or have the CDN ignore it.`
+          : ""));
   }
   if (edge.length) {
     add("edge-cookie", "info", `Edge cookie${edge.length > 1 ? "s" : ""} from the CDN: ${edge.join(", ")}`,
@@ -480,9 +488,10 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   // A cached Set-Cookie: a stored response repeats ALL of its cookies, value for value. If any cookie
   // differs between the two hits, cookies are being set per request after the cache (an edge function
   // adding a visitor id), and the identical ones are just constants. Seen on real sites: a fresh visitor
-  // id next to `consent=none` on both hits.
+  // id next to `consent=none` on both hits. Load balancer cookies are left out of the comparison: a balancer in front
+  // of an origin cache issues a new one per response while the stored session cookie repeats underneath it.
   const pairs = (s: Snapshot) =>
-    [...new Set(s.setCookies.map((c) => (c.split(";")[0] ?? "").trim()).filter((p) => p && !EDGE_COOKIES.test(cookieName(p))))].sort();
+    [...new Set(s.setCookies.map((c) => (c.split(";")[0] ?? "").trim()).filter((p) => p && !EDGE_COOKIES.test(cookieName(p)) && !LB_COOKIES.test(cookieName(p))))].sort();
   const pa = pairs(a);
   const pb = b ? pairs(b) : [];
   const repeated = hit && pa.length > 0 && pa.join("\n") === pb.join("\n");

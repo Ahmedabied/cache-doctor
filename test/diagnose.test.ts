@@ -301,3 +301,30 @@ test("Cloudflare errors (520 to 530) are not diagnosed as the site", () => {
     assert.deepEqual(ids(d), ["refused"]);
   }
 });
+
+test("a load balancer cookie issued per response cannot hide a stored session cookie", () => {
+  // ALB in front of Varnish: the balancer adds a fresh AWSALB to every response, the stored page repeats its cookie.
+  const h = { "cache-control": "public, s-maxage=600", "x-cache": "HIT", "x-varnish": "32770 3" };
+  const first = ["AWSALB=Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZg; Path=/", "sid=7c1e9a24b6d84f03a5e2c9b17d6f0e48; HttpOnly"];
+  const second = ["AWSALB=cXV4cXV1eDk4NzY1NDMyMWZlZGNiYQ; Path=/", "sid=7c1e9a24b6d84f03a5e2c9b17d6f0e48; HttpOnly"];
+  const d = diagnose("u", snap(h, { setCookies: first }), snap(h, { setCookies: second }));
+  assert.equal(d.verdict, "cached-unsafe");
+  const leak = d.findings.find((f) => f.id === "cached-cookie")!;
+  assert.match(leak.title, /sid/);
+  assert.doesNotMatch(leak.title, /AWSALB/);
+  // The balancer's own cookie repeated on both hits is not an identity leak.
+  const lb = ["AWSALB=Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZg; Path=/"];
+  assert.ok(!ids(diagnose("u", snap(h, { setCookies: lb }), snap(h, { setCookies: lb }))).some((x) => x.startsWith("cached-cookie")));
+});
+
+test("a load balancer cookie still stops a CDN in front of it, with the fix that applies", () => {
+  const h = { "cache-control": "public, max-age=600" };
+  const d = diagnose("u", snap(h, { setCookies: ["AWSALB=abc; Path=/", "AWSALBCORS=abc; Path=/; SameSite=None; Secure"] }));
+  const f = d.findings.find((x) => x.id === "set-cookie")!;
+  assert.equal(f.severity, "blocks");
+  assert.match(f.fix, /AWSALB, AWSALBCORS is a load balancer's stickiness cookie/);
+  // Front Door's affinity cookies and Akamai's balancer cookies are added at the edge, like __cf_bm.
+  const edge = diagnose("u", snap(h, { setCookies: ["ASLBSA=1f2e", "ASLBSACORS=1f2e", "akaalb_shop=~op=a:b"] }));
+  assert.ok(!ids(edge).includes("set-cookie"));
+  assert.ok(ids(edge).includes("edge-cookie"));
+});

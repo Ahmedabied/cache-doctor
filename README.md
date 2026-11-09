@@ -48,11 +48,11 @@ It asks for the page twice, back to back, with no cookies, and compares the two 
 | Cache-Control | `no-store`, `private`, `no-cache`, `max-age=0` without `s-maxage`, short lifetimes, and the targeted `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control` headers that override it for CDNs |
 | Status | statuses a cache only stores when told how long or marked `public` (302, 307, 500, 503 and others); a 401, 403 or 429 is reported as the site refusing the check, and a Cloudflare 520 to 530 as Cloudflare not reaching the site, neither diagnosed as the page |
 | Lifetimes | no lifetime at all (HTML versus static files), a `max-age` that is not a number (stale, RFC 9111 4.2.1), `Expires` in the past or not a real HTTP date (expired, RFC 9111 5.3), legacy `Pragma` |
-| Cookies | `Set-Cookie` on an anonymous visit, by name; `private="Set-Cookie"` and `no-cache="Set-Cookie"`, the standard way to cache the page without the cookie (with the RFC's warning that many caches do not support it); cookies a CDN adds at the edge (`__cf_bm`, Akamai and Imperva bot cookies) are recognised and not blamed on the origin |
+| Cookies | `Set-Cookie` on an anonymous visit, by name; `private="Set-Cookie"` and `no-cache="Set-Cookie"`, the standard way to cache the page without the cookie (with the RFC's warning that many caches do not support it); cookies a CDN adds at the edge (`__cf_bm`, Akamai, Imperva, Azure Front Door and Sucuri) are recognised and not blamed on the origin; a load balancer's stickiness cookie is blamed, since it does reach a CDN in front of it, with the fix for that |
 | Vary | `*`, `Cookie`, `Authorization`, `User-Agent`, `Accept-Language` |
 | The URL | tracking parameters (`utm_*`, `gclid`, `fbclid` and others) that split the cache key, and cache busters |
 | The body | what differs between the two anonymous responses: per-visitor CSRF tokens, CSP nonces, timestamps and request ids, shown with their context and the values masked |
-| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker. Edge cookies this tool knows about are left out of that comparison; one it does not know, set fresh on every request, would hide a stored cookie |
+| The CDN | Cloudflare, Fastly, CloudFront, Vercel, Netlify, Akamai, and the standard `Cache-Status` header (parsed as the RFC 9211 list; only a real `hit` counts, and `HIT-FOR-PASS` is a miss). A HIT on the second request is proof the CDN caches the page, so it decides the verdict. If both hits carry exactly the same cookies, value for value, and one is long enough to identify someone, the cache is handing one visitor's cookie to everyone: that is a blocker. Edge cookies and load balancer stickiness cookies (`AWSALB`, `BIGipServer...`, `ARRAffinity`) are left out of that comparison, so a balancer in front of Varnish that issues a new `AWSALB` on every response cannot hide a stored session cookie. A cookie it does not know, set fresh on every request, still would |
 
 31 finding types in all, each with a test.
 
@@ -117,7 +117,7 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
 
 ```sh
 npm ci
-npm test            # 37 tests: every finding, the probe and CLI against a local server
+npm test            # 39 tests: every finding, the probe and CLI against a local server
 npm run typecheck   # the library and the Worker
 npm run compile     # rebuild dist/src (committed, so `npx github:` needs no dev tools; CI checks it is current)
 npx wrangler dev    # the page on localhost:8787
