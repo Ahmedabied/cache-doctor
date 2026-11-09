@@ -16,6 +16,9 @@ From your own machine (Node 22.18 or newer):
 npx github:Ahmedabied/cache-doctor github.com
 ```
 
+The built CLI is in the repo and has no dependencies, so a cold start with an empty npm cache downloads 296 KB and
+takes about 5 s (4.6 s measured).
+
 ```
 https://github.com/
   verdict: not cacheable at a shared cache (3 blocking, 2 hurting)
