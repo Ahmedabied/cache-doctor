@@ -60,7 +60,7 @@ form { display: flex; gap: 10px; }
 input { flex: 1; min-width: 0; font: 15px ${MONO}; padding: 14px 16px; border: 1px solid var(--line);
   border-radius: 10px; background: var(--card); color: var(--fg); outline: none; }
 input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
-button[type=submit] { font: 600 15px/1 inherit; padding: 0 24px; border: 0; border-radius: 10px;
+button[type=submit] { font: inherit; font-size: 15px; font-weight: 600; line-height: 1; padding: 0 24px; border: 0; border-radius: 10px;
   background: var(--fg); color: var(--bg); cursor: pointer; }
 button[disabled] { opacity: .5; cursor: progress; }
 .try { color: var(--muted); font-size: 14px; margin: 14px 0 44px; }

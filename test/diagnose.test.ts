@@ -49,6 +49,7 @@ test("no-cache and zero lifetimes force a trip to the origin", () => {
 test("Expires in the past or invalid", () => {
   assert.ok(ids(run({ expires: "0" })).includes("expires-past"));
   assert.ok(ids(run({ expires: "Thu, 01 Jan 1970 00:00:00 GMT", date: "Mon, 09 Nov 2026 07:00:00 GMT" })).includes("expires-past"));
+  assert.deepEqual(ids(run({ pragma: "no-cache", expires: "Mon, 09 Nov 2026 08:00:00 GMT", date: "Mon, 09 Nov 2026 07:00:00 GMT" })), ["pragma"]);
   const future = run({ expires: "Mon, 09 Nov 2026 08:00:00 GMT", date: "Mon, 09 Nov 2026 07:00:00 GMT" });
   assert.equal(future.ttl, 3600);
   assert.equal(future.verdict, "cacheable");
@@ -76,6 +77,7 @@ test("Vary", () => {
   assert.deepEqual(ids(run({ "cache-control": "s-maxage=60", vary: "User-Agent" })), ["vary-user-agent"]);
   assert.deepEqual(ids(run({ "cache-control": "s-maxage=60", vary: "accept-language" })), ["vary-accept-language"]);
   assert.deepEqual(ids(run({ "cache-control": "s-maxage=60", vary: "Accept-Encoding" })), []);
+  assert.deepEqual(ids(run({ "cache-control": "s-maxage=60", vary: "Authorization" })), ["vary-authorization"]);
 });
 
 test("no lifetime: HTML hurts, static files are fine", () => {
