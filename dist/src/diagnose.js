@@ -80,10 +80,11 @@ function ageSaysStored(h, first) {
         return false;
     return Number(raw) > 0 || (first !== undefined && first["age"] === undefined);
 }
-export function servedFromCache(h, first) {
+// trustAge is false inside a Worker: Cloudflare's own subrequest cache can answer and set Age itself.
+export function servedFromCache(h, first, trustAge = true) {
     const name = STATUS_HEADERS.find((n) => h[n]);
     if (!name)
-        return varnishIds(h).length === 2 || ageSaysStored(h, first);
+        return varnishIds(h).length === 2 || (trustAge && ageSaysStored(h, first));
     if (name === "cache-status")
         return parseCacheStatus(h[name]).some((m) => m.params.get("hit") === true);
     return wordHit(h[name]);
@@ -428,7 +429,7 @@ export function diagnose(url, a, b, opts = {}) {
     const cdnName = detectCdn(h);
     const statuses = [cacheStatus(h), b ? cacheStatus(b.headers) : ""].filter(Boolean);
     const last = (statuses[statuses.length - 1] ?? "").trim();
-    const hit = Boolean(b) && servedFromCache(b.headers, h);
+    const hit = Boolean(b) && servedFromCache(b.headers, h, !opts.insideCloudflare);
     // A cached Set-Cookie: a stored response repeats ALL of its cookies, value for value. If any cookie
     // differs between the two hits, cookies are being set per request after the cache (an edge function
     // adding a visitor id), and the identical ones are just constants. Seen on real sites: a fresh visitor

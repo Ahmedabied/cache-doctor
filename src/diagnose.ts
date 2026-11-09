@@ -111,9 +111,10 @@ function ageSaysStored(h: Record<string, string>, first?: Record<string, string>
   return Number(raw) > 0 || (first !== undefined && first["age"] === undefined);
 }
 
-export function servedFromCache(h: Record<string, string>, first?: Record<string, string>): boolean {
+// trustAge is false inside a Worker: Cloudflare's own subrequest cache can answer and set Age itself.
+export function servedFromCache(h: Record<string, string>, first?: Record<string, string>, trustAge = true): boolean {
   const name = STATUS_HEADERS.find((n) => h[n]);
-  if (!name) return varnishIds(h).length === 2 || ageSaysStored(h, first);
+  if (!name) return varnishIds(h).length === 2 || (trustAge && ageSaysStored(h, first));
   if (name === "cache-status") return parseCacheStatus(h[name]!).some((m) => m.params.get("hit") === true);
   return wordHit(h[name]!);
 }
@@ -507,7 +508,7 @@ export function diagnose(url: string, a: Snapshot, b?: Snapshot, opts: DiagnoseO
   const cdnName = detectCdn(h);
   const statuses = [cacheStatus(h), b ? cacheStatus(b.headers) : ""].filter(Boolean);
   const last = (statuses[statuses.length - 1] ?? "").trim();
-  const hit = Boolean(b) && servedFromCache(b!.headers, h);
+  const hit = Boolean(b) && servedFromCache(b!.headers, h, !opts.insideCloudflare);
 
   // A cached Set-Cookie: a stored response repeats ALL of its cookies, value for value. If any cookie
   // differs between the two hits, cookies are being set per request after the cache (an edge function

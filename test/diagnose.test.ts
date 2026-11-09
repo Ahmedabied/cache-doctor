@@ -370,4 +370,10 @@ test("a cache that only says Age: Google's front end, a hit in the same second, 
   assert.notEqual(pair({ via: "1.1 google" }, { via: "1.1 google" }).verdict, "cached-at-cdn");
   // A real status header still decides over Age.
   assert.notEqual(pair({ "x-cache": "MISS" }, { "x-cache": "MISS", age: "5" }).verdict, "cached-at-cdn");
+  // Inside a Worker, Cloudflare's own subrequest cache can answer the second fetch and set Age itself (seen live:
+  // Age 205561 from the site, then Age 0), so Age says nothing about the site's CDN there.
+  const inCf = (a: Record<string, string>, b: Record<string, string>) =>
+    diagnose("u", snap({ ...base, ...a }), snap({ ...base, ...b }), { insideCloudflare: true });
+  assert.notEqual(inCf({}, { age: "0" }).verdict, "cached-at-cdn");
+  assert.notEqual(inCf({}, { age: "3" }).verdict, "cached-at-cdn");
 });

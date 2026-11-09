@@ -111,7 +111,9 @@ To run your own: `npx wrangler deploy` (set `CLOUDFLARE_ACCOUNT_ID` if you have 
   is why an observed HIT wins: it is the only proof of what the CDN does.
 - **From the Worker, Cloudflare is half blind.** Cloudflare adds `cf-*` headers and rewrites `server` on every
   fetch a Worker makes, so the web page cannot read Cloudflare's own cache status, and some sites refuse cloud
-  addresses. The command line tool, run from your machine, sees both.
+  addresses. Cloudflare can also answer the Worker's second fetch from its own cache and set `Age` itself (seen:
+  `Age` 205561 from Google, then 0), so the web page does not read `Age` as a hit. The command line tool, run from
+  your machine, sees all of it.
 - **The body comparison is a heuristic.** It finds what changed between two responses and names it from the words
   around it. It reads the first 512 KB (200 KB on the web page).
 - **CDN defaults differ.** Where a fix mentions a default, it is Cloudflare's documented behaviour.
